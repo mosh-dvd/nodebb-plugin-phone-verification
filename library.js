@@ -31,8 +31,11 @@ plugin.validatePhoneNumber = function (phone) {
     if (!phone || typeof phone !== 'string') {
         return false;
     }
-    const phoneRegex = /^05\d[-]?\d{7}$/;
-    return phoneRegex.test(phone);
+    // מנקה את המספר מתווים מיוחדים לפני הבדיקה
+    const cleanPhone = phone.replace(/[-\s]/g, '');
+    // בודק מספר ישראלי: 10 ספרות שמתחיל ב-05
+    const phoneRegex = /^05\d{8}$/;
+    return phoneRegex.test(cleanPhone);
 };
 
 plugin.normalizePhone = function (phone) {
@@ -284,15 +287,22 @@ plugin.clearAllPhones = function () {};
 plugin.checkRegistration = async function (data) {
     const phoneNumber = data.req.body.phoneNumber;
     
-    console.log('[phone-verification] checkRegistration called with phone:', phoneNumber);
+    console.log('[phone-verification] checkRegistration called');
+    console.log('[phone-verification] req.body:', JSON.stringify(data.req.body));
+    console.log('[phone-verification] phoneNumber value:', phoneNumber);
+    console.log('[phone-verification] phoneNumber type:', typeof phoneNumber);
     
     if (!phoneNumber) {
         console.log('[phone-verification] No phone number provided');
         throw new Error('חובה להזין מספר טלפון');
     }
     
-    if (!plugin.validatePhoneNumber(phoneNumber)) {
-        console.log('[phone-verification] Invalid phone format:', phoneNumber);
+    // נרמול הטלפון לפני הוולידציה
+    const cleanPhone = plugin.normalizePhone(phoneNumber);
+    console.log('[phone-verification] Cleaned phone:', cleanPhone);
+    
+    if (!plugin.validatePhoneNumber(cleanPhone)) {
+        console.log('[phone-verification] Invalid phone format:', phoneNumber, '-> cleaned:', cleanPhone);
         throw new Error('מספר הטלפון אינו תקין');
     }
     
