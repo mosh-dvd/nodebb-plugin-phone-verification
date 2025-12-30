@@ -35,8 +35,8 @@
         }
     ],
     "modules": {
-        "forum/phone-verification": "static/lib/main.js",
-        "admin/plugins/phone-verification": "static/lib/admin.js"
+        "../client/phone-verification.js": "static/lib/main.js",
+        "../admin/plugins/phone-verification.js": "static/lib/admin.js"
     },
     "scripts": [
         "static/lib/main.js"
