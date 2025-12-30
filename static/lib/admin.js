@@ -2,7 +2,7 @@
 
 /* globals $, config, app */
 
-define('admin/plugins/phone-verification', ['csrf'], function (csrf) {
+define('admin/plugins/phone-verification', [], function () {
     var ACP = {};
 
     ACP.init = function () {
@@ -49,7 +49,7 @@ define('admin/plugins/phone-verification', ['csrf'], function (csrf) {
             url: config.relative_path + '/api/admin/plugins/phone-verification/settings',
             method: 'POST',
             headers: {
-                'x-csrf-token': csrf.get()
+                'x-csrf-token': config.csrf_token
             },
             data: {
                 voiceServerEnabled: $('#voiceServerEnabled').is(':checked'),
@@ -90,6 +90,9 @@ define('admin/plugins/phone-verification', ['csrf'], function (csrf) {
         $.ajax({
             url: config.relative_path + '/api/admin/plugins/phone-verification/test-call',
             method: 'POST',
+            headers: {
+                'x-csrf-token': config.csrf_token
+            },
             data: { phoneNumber: phone },
             success: function (response) {
                 if (response.success) {
