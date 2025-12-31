@@ -4,7 +4,8 @@ define('forum/phone-verification', ['hooks'], function (hooks) {
     
     // ==================== קבועים ====================
     const RESEND_COOLDOWN = 60; // שניות
-    const PHONE_REGEX = /^05\d[-]?\d{7}$/;
+    // תומך במספר ישראלי: 10 ספרות שמתחיל ב-05, עם או בלי מקף
+    const PHONE_REGEX = /^05\d{1}[-]?\d{7}$/;
     
     // ==================== משתנים ====================
     let resendTimer = null;
@@ -261,6 +262,12 @@ define('forum/phone-verification', ['hooks'], function (hooks) {
         
         // מניעת שליחת טופס ללא אימות
         $('[component="register/local"]').off('submit.phone').on('submit.phone', function (e) {
+            // לוג לדיבוג
+            console.log('[phone-verification] Form submit triggered');
+            console.log('[phone-verification] phoneVerified:', phoneVerified);
+            console.log('[phone-verification] Hidden field exists:', $('#phoneNumberVerified').length > 0);
+            console.log('[phone-verification] Hidden field value:', $('#phoneNumberVerified').val());
+            
             if (!phoneVerified) {
                 e.preventDefault();
                 e.stopPropagation();
