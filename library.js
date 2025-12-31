@@ -17,6 +17,7 @@ const CODE_EXPIRY_MINUTES = 5;
 const MAX_ATTEMPTS = 3;
 const BLOCK_DURATION_MINUTES = 15;
 const PHONE_FIELD_KEY = 'phoneNumber';
+const DEBUG_SKIP_VERIFICATION = false; // שנה ל-true לדיבוג
 
 // ==================== הגדרות ברירת מחדל ====================
 const defaultSettings = {
@@ -144,35 +145,57 @@ plugin.clearAllCodes = function () {
     verificationCodes.clear();
 };
 
-// ==================== טלפונים מאומתים זמנית ====================
-const verifiedPhones = new Map();
+// ==================== טלפונים מאומתים זמנית (Redis) ====================
+// שימוש ב-Redis במקום Map כדי לתמוך במספר processes
 
-plugin.markPhoneAsVerified = function (phone) {
+plugin.markPhoneAsVerified = async function (phone) {
     const normalizedPhone = plugin.normalizePhone(phone);
-    console.log('[phone-verification] Marking phone as verified:', normalizedPhone);
-    verifiedPhones.set(normalizedPhone, {
-        verified: true,
-        verifiedAt: Date.now()
-    });
-    console.log('[phone-verification] Verified phones after marking:', Array.from(verifiedPhones.keys()));
+    console.log('[phone-verification] Marking phone as verified in Redis:', normalizedPhone);
+    
+    if (!db) {
+        console.log('[phone-verification] DB not available, using fallback');
+        return;
+    }
+    
+    const key = `phone-verification:verified:${normalizedPhone}`;
+    const tenMinutes = 10 * 60; // seconds
+    
+    await db.set(key, Date.now());
+    await db.pexpireAt(key, Date.now() + (tenMinutes * 1000));
+    
+    console.log('[phone-verification] Phone marked as verified in Redis');
 };
 
-plugin.isPhoneVerified = function (phone) {
+plugin.isPhoneVerified = async function (phone) {
     const normalizedPhone = plugin.normalizePhone(phone);
-    const data = verifiedPhones.get(normalizedPhone);
-    if (!data) return false;
+    console.log('[phone-verification] Checking if phone is verified in Redis:', normalizedPhone);
+    
+    if (!db) {
+        console.log('[phone-verification] DB not available');
+        return false;
+    }
+    
+    const key = `phone-verification:verified:${normalizedPhone}`;
+    const verifiedAt = await db.get(key);
+    
+    console.log('[phone-verification] Redis lookup result:', verifiedAt);
+    
+    if (!verifiedAt) return false;
     
     const tenMinutes = 10 * 60 * 1000;
-    if (Date.now() - data.verifiedAt > tenMinutes) {
-        verifiedPhones.delete(normalizedPhone);
+    if (Date.now() - parseInt(verifiedAt, 10) > tenMinutes) {
+        await db.delete(key);
         return false;
     }
     return true;
 };
 
-plugin.clearVerifiedPhone = function (phone) {
+plugin.clearVerifiedPhone = async function (phone) {
     const normalizedPhone = plugin.normalizePhone(phone);
-    verifiedPhones.delete(normalizedPhone);
+    if (!db) return;
+    
+    const key = `phone-verification:verified:${normalizedPhone}`;
+    await db.delete(key);
 };
 
 
@@ -314,9 +337,14 @@ plugin.checkRegistration = async function (data) {
         throw new Error('מספר הטלפון כבר רשום במערכת');
     }
     
-    const isVerified = plugin.isPhoneVerified(normalizedPhone);
-    console.log('[phone-verification] Is phone verified:', isVerified);
-    console.log('[phone-verification] Verified phones map:', Array.from(verifiedPhones.keys()));
+    const isVerified = await plugin.isPhoneVerified(normalizedPhone);
+    console.log('[phone-verification] Is phone verified (from Redis):', isVerified);
+    
+    if (DEBUG_SKIP_VERIFICATION) {
+        console.log('[phone-verification] DEBUG MODE: Skipping verification check');
+        data.userData.phoneNumber = normalizedPhone;
+        return data;
+    }
     
     if (!isVerified) {
         throw new Error('יש לאמת את מספר הטלפון לפני ההרשמה');
@@ -336,7 +364,7 @@ plugin.userCreated = async function (data) {
     
     if (phoneNumber && user && user.uid) {
         await plugin.savePhoneToUser(user.uid, phoneNumber, true);
-        plugin.clearVerifiedPhone(phoneNumber);
+        await plugin.clearVerifiedPhone(phoneNumber);
     }
 };
 
@@ -620,7 +648,7 @@ plugin.apiVerifyCode = async function (req, res) {
         const result = plugin.verifyCode(normalizedPhone, code);
         
         if (result.success) {
-            plugin.markPhoneAsVerified(normalizedPhone);
+            await plugin.markPhoneAsVerified(normalizedPhone);
         }
         
         res.json(result);
