@@ -2,7 +2,7 @@
 
 const crypto = require('crypto');
 
-// NodeBB modules - יטענו בזמן ריצה
+// NodeBB modules
 let db;
 let User;
 let meta;
@@ -14,36 +14,31 @@ const CODE_EXPIRY_MINUTES = 5;
 const MAX_ATTEMPTS = 3;
 const BLOCK_DURATION_MINUTES = 15;
 const PHONE_FIELD_KEY = 'phoneNumber';
-const DEBUG_SKIP_VERIFICATION = false; // שנה ל-true לדיבוג
+const DEBUG_SKIP_VERIFICATION = false; 
 const REDIS_PREFIX = 'phone-verification:code:';
 const IP_RATE_LIMIT_PREFIX = 'phone-verification:ip:';
-const MAX_REQUESTS_PER_IP = 10; // מקסימום בקשות ליום לכל IP
+const MAX_REQUESTS_PER_IP = 10;
 const IP_BLOCK_HOURS = 24;
 
 // ==================== הגדרות ברירת מחדל ====================
 const defaultSettings = {
     voiceServerUrl: '',
     voiceServerApiKey: '',
-    voiceServerEnabled: false
+    voiceServerEnabled: false,
+    blockUnverifiedUsers: false // הגדרה חדשה: חסימת משתמשים לא מאומתים
 };
 
 // ==================== פונקציות עזר ====================
 
 plugin.validatePhoneNumber = function (phone) {
-    if (!phone || typeof phone !== 'string') {
-        return false;
-    }
-    // מנקה את המספר מתווים מיוחדים לפני הבדיקה
+    if (!phone || typeof phone !== 'string') return false;
     const cleanPhone = phone.replace(/[-\s]/g, '');
-    // בודק מספר ישראלי: 10 ספרות שמתחיל ב-05
     const phoneRegex = /^05\d{8}$/;
     return phoneRegex.test(cleanPhone);
 };
 
 plugin.normalizePhone = function (phone) {
-    if (!phone || typeof phone !== 'string') {
-        return '';
-    }
+    if (!phone || typeof phone !== 'string') return '';
     return phone.replace(/[-\s]/g, '');
 };
 
@@ -57,7 +52,38 @@ plugin.hashCode = function (code) {
     return crypto.createHash('sha256').update(code).digest('hex');
 };
 
-// ==================== קודי אימות (Redis - תומך ב-Clustering) ====================
+// ==================== בדיקת הרשאות פרסום (חדש) ====================
+
+plugin.checkPostingPermissions = async function (data) {
+    // זיהוי ה-UID מתוך המידע שמגיע מה-Hook (משתנה בין פוסט לנושא)
+    const uid = data.uid || (data.post && data.post.uid) || (data.topic && data.topic.uid);
+
+    // 1. אם המשתמש הוא אורח (0) או לא קיים - דלג (הרשאות רגילות יטפלו בזה)
+    if (!uid || parseInt(uid, 10) === 0) return data;
+
+    // 2. קבלת ההגדרות
+    const settings = await plugin.getSettings();
+
+    // 3. אם החסימה מכובה בהגדרות - אפשר להמשיך
+    if (!settings.blockUnverifiedUsers) return data;
+
+    // 4. אדמינים תמיד מורשים
+    const isAdmin = await User.isAdministrator(uid);
+    if (isAdmin) return data;
+
+    // 5. בדיקת סטטוס אימות
+    const phoneData = await plugin.getUserPhone(uid);
+
+    // אם אין טלפון או לא מאומת -> זרוק שגיאה עם הוראות
+    if (!phoneData || !phoneData.phoneVerified) {
+        throw new Error('<strong>גישה נדחתה:</strong> חובה לאמת מספר טלפון כדי לפרסם תוכן בפורום.<br/>' + 
+                        'אנא גש ל<a href="/user/me/edit" target="_blank">הגדרות הפרופיל שלך</a> ולחץ על "אמת מספר טלפון".');
+    }
+
+    return data;
+};
+
+// ==================== קודי אימות (Redis) ====================
 
 plugin.saveVerificationCode = async function (phone, code) {
     const normalizedPhone = plugin.normalizePhone(phone);
@@ -65,43 +91,24 @@ plugin.saveVerificationCode = async function (phone, code) {
     const expiresAt = now + (CODE_EXPIRY_MINUTES * 60 * 1000);
     const key = `${REDIS_PREFIX}${normalizedPhone}`;
     
-    if (!db) {
-        console.error('[phone-verification] DB not available for saving code');
-        return { success: false, error: 'DB_ERROR', message: 'שגיאת מערכת' };
-    }
+    if (!db) return { success: false, error: 'DB_ERROR', message: 'שגיאת מערכת' };
     
-    // בדיקה אם המספר חסום
     const existing = await db.getObject(key);
     if (existing && existing.blockedUntil && parseInt(existing.blockedUntil, 10) > now) {
         const remainingMinutes = Math.ceil((parseInt(existing.blockedUntil, 10) - now) / 60000);
-        return { 
-            success: false, 
-            error: 'PHONE_BLOCKED',
-            message: `המספר חסום זמנית, נסה שוב בעוד ${remainingMinutes} דקות`
-        };
+        return { success: false, error: 'PHONE_BLOCKED', message: `המספר חסום זמנית, נסה שוב בעוד ${remainingMinutes} דקות` };
     }
     
-    const data = {
-        hashedCode: plugin.hashCode(code),
-        attempts: 0,
-        createdAt: now,
-        expiresAt: expiresAt,
-        blockedUntil: 0
-    };
-    
+    const data = { hashedCode: plugin.hashCode(code), attempts: 0, createdAt: now, expiresAt: expiresAt, blockedUntil: 0 };
     await db.setObject(key, data);
-    // TTL של 20 דקות (כולל זמן חסימה אפשרי)
     await db.pexpireAt(key, now + (20 * 60 * 1000));
-    
     return { success: true, expiresAt };
 };
 
 plugin.getCodeExpiry = async function (phone) {
     const normalizedPhone = plugin.normalizePhone(phone);
     const key = `${REDIS_PREFIX}${normalizedPhone}`;
-    
     if (!db) return null;
-    
     const data = await db.getObject(key);
     return data ? parseInt(data.expiresAt, 10) : null;
 };
@@ -111,162 +118,75 @@ plugin.verifyCode = async function (phone, code) {
     const now = Date.now();
     const key = `${REDIS_PREFIX}${normalizedPhone}`;
     
-    if (!db) {
-        return { success: false, error: 'DB_ERROR', message: 'שגיאת מערכת' };
-    }
-    
+    if (!db) return { success: false, error: 'DB_ERROR', message: 'שגיאת מערכת' };
     const data = await db.getObject(key);
     
-    if (!data) {
-        return { success: false, error: 'CODE_NOT_FOUND', message: 'לא נמצא קוד אימות למספר זה' };
-    }
-    
+    if (!data) return { success: false, error: 'CODE_NOT_FOUND', message: 'לא נמצא קוד אימות למספר זה' };
     if (data.blockedUntil && parseInt(data.blockedUntil, 10) > now) {
         const remainingMinutes = Math.ceil((parseInt(data.blockedUntil, 10) - now) / 60000);
-        return { 
-            success: false, 
-            error: 'PHONE_BLOCKED',
-            message: `המספר חסום זמנית, נסה שוב בעוד ${remainingMinutes} דקות`
-        };
+        return { success: false, error: 'PHONE_BLOCKED', message: `המספר חסום זמנית, נסה שוב בעוד ${remainingMinutes} דקות` };
     }
+    if (parseInt(data.expiresAt, 10) < now) return { success: false, error: 'CODE_EXPIRED', message: 'קוד האימות פג תוקף' };
     
-    if (parseInt(data.expiresAt, 10) < now) {
-        return { success: false, error: 'CODE_EXPIRED', message: 'קוד האימות פג תוקף' };
-    }
-    
-    const hashedInput = plugin.hashCode(code);
-    if (hashedInput === data.hashedCode) {
+    if (plugin.hashCode(code) === data.hashedCode) {
         await db.delete(key);
         return { success: true };
     }
     
-    // עדכון מספר ניסיונות
     const attempts = parseInt(data.attempts, 10) + 1;
-    
     if (attempts >= MAX_ATTEMPTS) {
         const blockedUntil = now + (BLOCK_DURATION_MINUTES * 60 * 1000);
         await db.setObjectField(key, 'blockedUntil', blockedUntil);
         await db.setObjectField(key, 'attempts', attempts);
-        return { 
-            success: false, 
-            error: 'PHONE_BLOCKED',
-            message: `המספר נחסם ל-${BLOCK_DURATION_MINUTES} דקות עקב ניסיונות כושלים`
-        };
+        return { success: false, error: 'PHONE_BLOCKED', message: `המספר נחסם ל-${BLOCK_DURATION_MINUTES} דקות עקב ניסיונות כושלים` };
     }
-    
     await db.setObjectField(key, 'attempts', attempts);
-    
-    return { 
-        success: false, 
-        error: 'CODE_INVALID',
-        message: `קוד האימות שגוי. נותרו ${MAX_ATTEMPTS - attempts} ניסיונות`
-    };
+    return { success: false, error: 'CODE_INVALID', message: `קוד האימות שגוי. נותרו ${MAX_ATTEMPTS - attempts} ניסיונות` };
 };
-
-plugin.clearVerificationCode = async function (phone) {
-    const normalizedPhone = plugin.normalizePhone(phone);
-    const key = `${REDIS_PREFIX}${normalizedPhone}`;
-    if (db) {
-        await db.delete(key);
-    }
-};
-
-plugin.clearAllCodes = async function () {
-    // לא ממומש - Redis מנקה אוטומטית עם TTL
-};
-
-// ==================== Rate Limiting לפי IP ====================
 
 plugin.checkIpRateLimit = async function (ip) {
     if (!db || !ip) return { allowed: true };
-    
     const key = `${IP_RATE_LIMIT_PREFIX}${ip}`;
     const count = await db.get(key);
-    
     if (count && parseInt(count, 10) >= MAX_REQUESTS_PER_IP) {
-        return { 
-            allowed: false, 
-            error: 'IP_BLOCKED',
-            message: 'חרגת ממספר הבקשות המותר. נסה שוב מאוחר יותר.'
-        };
+        return { allowed: false, error: 'IP_BLOCKED', message: 'חרגת ממספר הבקשות המותר. נסה שוב מאוחר יותר.' };
     }
-    
     return { allowed: true };
 };
 
 plugin.incrementIpCounter = async function (ip) {
     if (!db || !ip) return;
-    
     const key = `${IP_RATE_LIMIT_PREFIX}${ip}`;
     const exists = await db.exists(key);
-    
     await db.increment(key);
-    
-    if (!exists) {
-        // TTL של 24 שעות
-        await db.pexpireAt(key, Date.now() + (IP_BLOCK_HOURS * 60 * 60 * 1000));
-    }
+    if (!exists) await db.pexpireAt(key, Date.now() + (IP_BLOCK_HOURS * 60 * 60 * 1000));
 };
-
-// ==================== טלפונים מאומתים זמנית (Redis) ====================
-// שימוש ב-Redis במקום Map כדי לתמוך במספר processes
 
 plugin.markPhoneAsVerified = async function (phone) {
     const normalizedPhone = plugin.normalizePhone(phone);
-    console.log('[phone-verification] Marking phone as verified in Redis:', normalizedPhone);
-    
-    if (!db) {
-        console.log('[phone-verification] DB not available, using fallback');
-        return;
-    }
-    
+    if (!db) return;
     const key = `phone-verification:verified:${normalizedPhone}`;
-    const tenMinutes = 10 * 60; // seconds
-    
     await db.set(key, Date.now());
-    await db.pexpireAt(key, Date.now() + (tenMinutes * 1000));
-    
-    console.log('[phone-verification] Phone marked as verified in Redis');
+    await db.pexpireAt(key, Date.now() + (600 * 1000)); // 10 minutes
 };
 
 plugin.isPhoneVerified = async function (phone) {
     const normalizedPhone = plugin.normalizePhone(phone);
-    console.log('[phone-verification] Checking if phone is verified in Redis:', normalizedPhone);
-    
-    if (!db) {
-        console.log('[phone-verification] DB not available');
-        return false;
-    }
-    
+    if (!db) return false;
     const key = `phone-verification:verified:${normalizedPhone}`;
     const verifiedAt = await db.get(key);
-    
-    console.log('[phone-verification] Redis lookup result:', verifiedAt);
-    
     if (!verifiedAt) return false;
-    
-    const tenMinutes = 10 * 60 * 1000;
-    if (Date.now() - parseInt(verifiedAt, 10) > tenMinutes) {
-        await db.delete(key);
-        return false;
-    }
+    if (Date.now() -SXverifiedAt > 600000) { await db.delete(key); return false; }
     return true;
 };
 
 plugin.clearVerifiedPhone = async function (phone) {
     const normalizedPhone = plugin.normalizePhone(phone);
-    if (!db) return;
-    
-    const key = `phone-verification:verified:${normalizedPhone}`;
-    await db.delete(key);
+    if (db) await db.delete(`phone-verification:verified:${normalizedPhone}`);
 };
 
+// ==================== פונקציות DB ====================
 
-// ==================== פונקציות DB - שמירה ושליפה מ-NodeBB ====================
-
-/**
- * בדיקה אם מספר טלפון כבר קיים במערכת
- */
 plugin.isPhoneExists = async function (phone) {
     if (!db) return false;
     const normalizedPhone = plugin.normalizePhone(phone);
@@ -274,51 +194,28 @@ plugin.isPhoneExists = async function (phone) {
     return !!uid;
 };
 
-/**
- * שמירת מספר טלפון למשתמש ב-DB של NodeBB
- */
 plugin.savePhoneToUser = async function (uid, phone, verified = true) {
     if (!db || !User) return { success: false };
-    
     const normalizedPhone = plugin.normalizePhone(phone);
-    
-    // בדיקה אם המספר כבר קיים למשתמש אחר
     const existingUid = await db.sortedSetScore('phone:uid', normalizedPhone);
     if (existingUid && parseInt(existingUid, 10) !== parseInt(uid, 10)) {
-        return {
-            success: false,
-            error: 'PHONE_EXISTS',
-            message: 'מספר הטלפון כבר רשום במערכת'
-        };
+        return { success: false, error: 'PHONE_EXISTS', message: 'מספר הטלפון כבר רשום במערכת' };
     }
-    
     const now = Date.now();
-    
-    // שמירה בשדות המשתמש
     await User.setUserFields(uid, {
         [PHONE_FIELD_KEY]: normalizedPhone,
         phoneVerified: verified ? 1 : 0,
         phoneVerifiedAt: verified ? now : 0
     });
-    
-    // שמירה באינדקס לחיפוש
     await db.sortedSetAdd('phone:uid', uid, normalizedPhone);
     await db.sortedSetAdd('users:phone', now, uid);
-    
     return { success: true };
 };
 
-/**
- * קבלת מספר טלפון של משתמש
- */
 plugin.getUserPhone = async function (uid) {
     if (!User) return null;
-    
     const userData = await User.getUserFields(uid, [PHONE_FIELD_KEY, 'phoneVerified', 'phoneVerifiedAt']);
-    if (!userData || !userData[PHONE_FIELD_KEY]) {
-        return null;
-    }
-    
+    if (!userData || !userData[PHONE_FIELD_KEY]) return null;
     return {
         phone: userData[PHONE_FIELD_KEY],
         phoneVerified: parseInt(userData.phoneVerified, 10) === 1,
@@ -326,9 +223,6 @@ plugin.getUserPhone = async function (uid) {
     };
 };
 
-/**
- * חיפוש משתמש לפי מספר טלפון
- */
 plugin.findUserByPhone = async function (phone) {
     if (!db) return null;
     const normalizedPhone = plugin.normalizePhone(phone);
@@ -336,18 +230,12 @@ plugin.findUserByPhone = async function (phone) {
     return uid ? parseInt(uid, 10) : null;
 };
 
-/**
- * קבלת כל המשתמשים עם מספרי טלפון (עם Pagination)
- */
 plugin.getAllUsersWithPhones = async function (start = 0, stop = 49) {
     if (!db || !User) return { users: [], total: 0 };
-    
     const total = await db.sortedSetCard('users:phone');
     const uids = await db.getSortedSetRange('users:phone', start, stop);
     if (!uids || !uids.length) return { users: [], total };
-    
     const users = await User.getUsersFields(uids, ['uid', 'username', PHONE_FIELD_KEY, 'phoneVerified', 'phoneVerifiedAt']);
-    
     const usersList = users.filter(u => u && u[PHONE_FIELD_KEY]).map(u => ({
         uid: u.uid,
         username: u.username,
@@ -355,121 +243,52 @@ plugin.getAllUsersWithPhones = async function (start = 0, stop = 49) {
         phoneVerified: parseInt(u.phoneVerified, 10) === 1,
         phoneVerifiedAt: parseInt(u.phoneVerifiedAt, 10) || null
     }));
-    
     return { users: usersList, total };
 };
 
-plugin.canViewPhone = function (uid, callerUid, isAdmin) {
-    if (isAdmin) return true;
-    return parseInt(uid, 10) === parseInt(callerUid, 10);
-};
-
-// לבדיקות
-plugin.clearAllPhones = function () {};
-
-
 // ==================== Hooks ====================
 
-/**
- * Hook: filter:register.check
- */
 plugin.checkRegistration = async function (data) {
     const phoneNumber = data.req.body.phoneNumber;
-    
-    console.log('[phone-verification] checkRegistration called');
-    console.log('[phone-verification] req.body:', JSON.stringify(data.req.body));
-    console.log('[phone-verification] phoneNumber value:', phoneNumber);
-    console.log('[phone-verification] phoneNumber type:', typeof phoneNumber);
-    
-    if (!phoneNumber) {
-        console.log('[phone-verification] No phone number provided');
-        throw new Error('חובה להזין מספר טלפון');
-    }
-    
-    // נרמול הטלפון לפני הוולידציה
+    if (!phoneNumber) throw new Error('חובה להזין מספר טלפון');
     const cleanPhone = plugin.normalizePhone(phoneNumber);
-    console.log('[phone-verification] Cleaned phone:', cleanPhone);
-    
-    if (!plugin.validatePhoneNumber(cleanPhone)) {
-        console.log('[phone-verification] Invalid phone format:', phoneNumber, '-> cleaned:', cleanPhone);
-        throw new Error('מספר הטלפון אינו תקין');
-    }
-    
+    if (!plugin.validatePhoneNumber(cleanPhone)) throw new Error('מספר הטלפון אינו תקין');
     const normalizedPhone = plugin.normalizePhone(phoneNumber);
-    console.log('[phone-verification] Normalized phone:', normalizedPhone);
-    
-    if (await plugin.isPhoneExists(normalizedPhone)) {
-        console.log('[phone-verification] Phone already exists in DB');
-        throw new Error('מספר הטלפון כבר רשום במערכת');
-    }
-    
-    const isVerified = await plugin.isPhoneVerified(normalizedPhone);
-    console.log('[phone-verification] Is phone verified (from Redis):', isVerified);
+    if (await plugin.isPhoneExists(normalizedPhone)) throw new Error('מספר הטלפון כבר רשום במערכת');
     
     if (DEBUG_SKIP_VERIFICATION) {
-        console.log('[phone-verification] DEBUG MODE: Skipping verification check');
         data.userData.phoneNumber = normalizedPhone;
         return data;
     }
     
-    if (!isVerified) {
-        throw new Error('יש לאמת את מספר הטלפון לפני ההרשמה');
-    }
+    const isVerified = await plugin.isPhoneVerified(normalizedPhone);
+    if (!isVerified) throw new Error('יש לאמת את מספר הטלפון לפני ההרשמה');
     
     data.userData.phoneNumber = normalizedPhone;
-    
     return data;
 };
 
-/**
- * Hook: action:user.create
- */
 plugin.userCreated = async function (data) {
     const { user } = data;
     const phoneNumber = data.data.phoneNumber;
-    
     if (phoneNumber && user && user.uid) {
         await plugin.savePhoneToUser(user.uid, phoneNumber, true);
         await plugin.clearVerifiedPhone(phoneNumber);
     }
 };
 
-/**
- * Hook: filter:admin.header.build
- * הוספת קישור לעמוד ההגדרות בתפריט Settings
- */
 plugin.addAdminNavigation = async function (header) {
     if (header.plugins) {
-        header.plugins.push({
-            route: '/plugins/phone-verification',
-            icon: 'fa-phone',
-            name: 'אימות טלפון'
-        });
+        header.plugins.push({ route: '/plugins/phone-verification', icon: 'fa-phone', name: 'אימות טלפון' });
     }
     return header;
 };
 
-/**
- * Hook: filter:user.whitelistFields
- * הוספת שדה הטלפון לרשימת השדות המותרים
- */
 plugin.whitelistFields = async function (data) {
     data.whitelist.push(PHONE_FIELD_KEY, 'phoneVerified', 'phoneVerifiedAt', 'showPhone');
     return data;
 };
 
-/**
- * Hook: filter:user.getFields
- * הוספת מידע הטלפון לנתוני המשתמש
- */
-plugin.addPhoneToUserData = async function (data) {
-    return data;
-};
-
-/**
- * Hook: filter:user.account
- * הוספת שדה טלפון לעמוד הגדרות החשבון
- */
 plugin.addPhoneToAccount = async function (data) {
     if (data.userData && data.userData.uid) {
         const phoneData = await plugin.getUserPhone(data.userData.uid);
@@ -477,60 +296,26 @@ plugin.addPhoneToAccount = async function (data) {
             data.userData.phoneNumber = phoneData.phone;
             data.userData.phoneVerified = phoneData.phoneVerified;
         }
-        // קבלת הגדרת הצגת הטלפון
         const showPhone = await db.getObjectField(`user:${data.userData.uid}`, 'showPhone');
         data.userData.showPhone = showPhone === '1' || showPhone === 1;
     }
     return data;
 };
 
-/**
- * Hook: filter:user.profileMenu
- * הוספת לינק לטלפון בתפריט הפרופיל (אופציונלי)
- */
-plugin.addPhoneToProfileMenu = async function (data) {
-    return data;
-};
-
-/**
- * Hook: filter:user.customFields
- * הוספת שדה טלפון לשדות המותאמים אישית
- */
-plugin.addCustomFields = async function (data) {
-    data.fields.push({
-        name: 'phoneNumber',
-        label: 'מספר טלפון',
-        type: 'text'
-    });
-    return data;
-};
-
-/**
- * Hook: filter:script.load
- * טעינת סקריפט צד-לקוח בעמוד ההרשמה
- */
 plugin.loadScript = async function (data) {
-    // טעינה בכל עמוד הרשמה
     if (data.tpl_url === 'register' || data.tpl === 'register') {
-        if (!data.scripts.includes('forum/phone-verification')) {
-            data.scripts.push('forum/phone-verification');
-        }
+        if (!data.scripts.includes('forum/phone-verification')) data.scripts.push('forum/phone-verification');
     }
     return data;
 };
 
-/**
- * Hook: static:app.load
- */
 plugin.init = async function (params) {
     const { router, middleware } = params;
-    
-    // טעינת מודולי NodeBB
     db = require.main.require('./src/database');
     User = require.main.require('./src/user');
     meta = require.main.require('./src/meta');
     
-    // API routes - עם middleware לבדיקת CSRF
+    // API routes
     router.post('/api/phone-verification/send-code', middleware.applyCSRF, plugin.apiSendCode);
     router.post('/api/phone-verification/verify-code', middleware.applyCSRF, plugin.apiVerifyCode);
     router.post('/api/phone-verification/initiate-call', middleware.applyCSRF, plugin.apiInitiateCall);
@@ -557,100 +342,66 @@ plugin.init = async function (params) {
 
 // ==================== הגדרות ====================
 
-/**
- * קבלת הגדרות התוסף
- */
 plugin.getSettings = async function () {
     if (!meta) return defaultSettings;
-    
     const settings = await meta.settings.get('phone-verification');
     return {
         voiceServerUrl: settings.voiceServerUrl || defaultSettings.voiceServerUrl,
         voiceServerApiKey: settings.voiceServerApiKey || defaultSettings.voiceServerApiKey,
-        voiceServerEnabled: settings.voiceServerEnabled === 'true' || settings.voiceServerEnabled === true
+        voiceServerEnabled: settings.voiceServerEnabled === 'true' || settings.voiceServerEnabled === true,
+        // קריאת ההגדרה החדשה
+        blockUnverifiedUsers: settings.blockUnverifiedUsers === 'true' || settings.blockUnverifiedUsers === true
     };
 };
 
-/**
- * שמירת הגדרות התוסף
- */
 plugin.saveSettings = async function (settings) {
     if (!meta) return false;
-    
     await meta.settings.set('phone-verification', {
         voiceServerUrl: settings.voiceServerUrl || '',
         voiceServerApiKey: settings.voiceServerApiKey || '',
-        voiceServerEnabled: settings.voiceServerEnabled ? 'true' : 'false'
+        voiceServerEnabled: settings.voiceServerEnabled ? 'true' : 'false',
+        // שמירת ההגדרה החדשה
+        blockUnverifiedUsers: settings.blockUnverifiedUsers ? 'true' : 'false'
     });
     return true;
 };
 
-/**
- * פורמט קוד לקריאה קולית (נקודות בין הספרות)
- */
 plugin.formatCodeForSpeech = function (code) {
     return code.split('').join(' ');
 };
 
-/**
- * שליחת שיחה קולית דרך Call2All API
- */
 plugin.sendVoiceCall = async function (phone, code) {
     const settings = await plugin.getSettings();
-    
     if (!settings.voiceServerEnabled || !settings.voiceServerApiKey) {
         return { success: false, error: 'VOICE_SERVER_DISABLED', message: 'שרת השיחות הקוליות לא מוגדר' };
     }
-    
     try {
-        // פורמט הקוד עם פסיקים לקריאה ברורה
         const spokenCode = plugin.formatCodeForSpeech(code);
-        
-        // בניית אובייקט הטלפונים לפי פורמט Call2All
         const phonesData = {};
         phonesData[phone] = {
             name: 'משתמש',
             moreinfo: `הקוד שלך לאתר הפורום למנתחות התנהגות הוא ${spokenCode} אני חוזר. הקוד הוא ${spokenCode}`,
             blocked: false
         };
-        
-        // בניית ה-URL עם הפרמטרים
         const baseUrl = 'https://www.call2all.co.il/ym/api/RunCampaign';
         const params = new URLSearchParams({
             ttsMode: '1',
             phones: JSON.stringify(phonesData),
             token: settings.voiceServerApiKey
         });
-        
         const url = `${baseUrl}?${params.toString()}`;
-        
-        console.log('[phone-verification] Calling Call2All API for phone:', phone);
-        
-        const response = await fetch(url, {
-            method: 'GET'
-        });
-        
-        if (!response.ok) {
-            console.error('[phone-verification] Call2All API error:', response.status, response.statusText);
-            return { success: false, error: 'VOICE_SERVER_ERROR', message: 'שגיאה בשרת השיחות הקוליות' };
-        }
-        
+        const response = await fetch(url, { method: 'GET' });
+        if (!response.ok) return { success: false, error: 'VOICE_SERVER_ERROR', message: 'שגיאה בשרת השיחות הקוליות' };
         const result = await response.json();
-        console.log('[phone-verification] Call2All response:', result);
-        
-        // בדיקת תגובת Call2All
         if (result.responseStatus === 'OK' || result.responseStatus === 'WAITING') {
             return { success: true, result };
         } else {
             return { success: false, error: 'VOICE_SERVER_ERROR', message: result.message || 'שגיאה בשליחת השיחה' };
         }
-        
     } catch (err) {
-        console.error('[phone-verification] Voice call error:', err);
         return { success: false, error: 'VOICE_SERVER_ERROR', message: 'שגיאה בהתחברות לשרת השיחות הקוליות' };
     }
 };
-
 
 // ==================== API Endpoints ====================
 
@@ -658,57 +409,33 @@ plugin.apiSendCode = async function (req, res) {
     try {
         const { phoneNumber } = req.body;
         const clientIp = req.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress;
-        
-        // בדיקת Rate Limit לפי IP
         const ipCheck = await plugin.checkIpRateLimit(clientIp);
-        if (!ipCheck.allowed) {
-            return res.json(ipCheck);
-        }
-        
-        // עדכון מונה IP מיד אחרי בדיקת Rate Limit (מונע הצפה גם עם בקשות לא תקינות)
+        if (!ipCheck.allowed) return res.json(ipCheck);
         await plugin.incrementIpCounter(clientIp);
         
-        if (!phoneNumber) {
-            return res.json({ success: false, error: 'PHONE_REQUIRED', message: 'חובה להזין מספר טלפון' });
-        }
-        
-        if (!plugin.validatePhoneNumber(phoneNumber)) {
-            return res.json({ success: false, error: 'PHONE_INVALID', message: 'מספר הטלפון אינו תקין' });
-        }
+        if (!phoneNumber) return res.json({ success: false, error: 'PHONE_REQUIRED', message: 'חובה להזין מספר טלפון' });
+        if (!plugin.validatePhoneNumber(phoneNumber)) return res.json({ success: false, error: 'PHONE_INVALID', message: 'מספר הטלפון אינו תקין' });
         
         const normalizedPhone = plugin.normalizePhone(phoneNumber);
-        
-        if (await plugin.isPhoneExists(normalizedPhone)) {
-            return res.json({ success: false, error: 'PHONE_EXISTS', message: 'מספר הטלפון כבר רשום במערכת' });
-        }
+        if (await plugin.isPhoneExists(normalizedPhone)) return res.json({ success: false, error: 'PHONE_EXISTS', message: 'מספר הטלפון כבר רשום במערכת' });
         
         const code = plugin.generateVerificationCode();
         const saveResult = await plugin.saveVerificationCode(normalizedPhone, code);
+        if (!saveResult.success) return res.json(saveResult);
         
-        if (!saveResult.success) {
-            return res.json(saveResult);
-        }
-        
-        // שליחת שיחה קולית
         const voiceResult = await plugin.sendVoiceCall(normalizedPhone, code);
-        
         const response = { 
             success: true, 
             message: voiceResult.success ? 'קוד אימות נשלח! תקבל שיחה בקרוב.' : 'קוד אימות נוצר בהצלחה',
             expiresAt: saveResult.expiresAt,
             voiceCallSent: voiceResult.success
         };
-        
-        // הוספת הקוד רק בסביבת development
         if (process.env.NODE_ENV === 'development') {
             response._code = code;
             response._phone = normalizedPhone;
         }
-        
         res.json(response);
-        
     } catch (err) {
-        console.error('[phone-verification] Send code error:', err);
         res.json({ success: false, error: 'SERVER_ERROR', message: 'אירעה שגיאה' });
     }
 };
@@ -716,41 +443,23 @@ plugin.apiSendCode = async function (req, res) {
 plugin.apiVerifyCode = async function (req, res) {
     try {
         const { phoneNumber, code } = req.body;
-        
-        if (!phoneNumber || !code) {
-            return res.json({ success: false, error: 'MISSING_PARAMS', message: 'חסרים פרמטרים' });
-        }
-        
+        if (!phoneNumber || !code) return res.json({ success: false, error: 'MISSING_PARAMS', message: 'חסרים פרמטרים' });
         const normalizedPhone = plugin.normalizePhone(phoneNumber);
         const result = await plugin.verifyCode(normalizedPhone, code);
-        
-        if (result.success) {
-            await plugin.markPhoneAsVerified(normalizedPhone);
-        }
-        
+        if (result.success) await plugin.markPhoneAsVerified(normalizedPhone);
         res.json(result);
-        
     } catch (err) {
         res.json({ success: false, error: 'SERVER_ERROR', message: 'אירעה שגיאה' });
     }
 };
 
-/**
- * בדיקת סטטוס אימות (למקרה של רענון דף)
- */
 plugin.apiCheckStatus = async function (req, res) {
     try {
         const { phoneNumber } = req.body;
-        
-        if (!phoneNumber) {
-            return res.json({ success: false, verified: false });
-        }
-        
+        if (!phoneNumber) return res.json({ success: false, verified: false });
         const normalizedPhone = plugin.normalizePhone(phoneNumber);
         const isVerified = await plugin.isPhoneVerified(normalizedPhone);
-        
         res.json({ success: true, verified: isVerified });
-        
     } catch (err) {
         res.json({ success: false, verified: false });
     }
@@ -759,30 +468,14 @@ plugin.apiCheckStatus = async function (req, res) {
 plugin.apiInitiateCall = async function (req, res) {
     try {
         const { phoneNumber } = req.body;
-        
-        if (!phoneNumber) {
-            return res.json({ success: false, error: 'PHONE_REQUIRED', message: 'חובה להזין מספר טלפון' });
-        }
-        
-        if (!plugin.validatePhoneNumber(phoneNumber)) {
-            return res.json({ success: false, error: 'PHONE_INVALID', message: 'מספר הטלפון אינו תקין' });
-        }
-        
+        if (!phoneNumber) return res.json({ success: false, error: 'PHONE_REQUIRED', message: 'חובה להזין מספר טלפון' });
+        if (!plugin.validatePhoneNumber(phoneNumber)) return res.json({ success: false, error: 'PHONE_INVALID', message: 'מספר הטלפון אינו תקין' });
         const normalizedPhone = plugin.normalizePhone(phoneNumber);
-        
-        if (await plugin.isPhoneExists(normalizedPhone)) {
-            return res.json({ success: false, error: 'PHONE_EXISTS', message: 'מספר הטלפון כבר רשום במערכת' });
-        }
-        
+        if (await plugin.isPhoneExists(normalizedPhone)) return res.json({ success: false, error: 'PHONE_EXISTS', message: 'מספר הטלפון כבר רשום במערכת' });
         const code = plugin.generateVerificationCode();
         const saveResult = await plugin.saveVerificationCode(normalizedPhone, code);
-        
-        if (!saveResult.success) {
-            return res.json(saveResult);
-        }
-        
+        if (!saveResult.success) return res.json(saveResult);
         res.json({ success: true, phone: normalizedPhone, code: code, expiresAt: saveResult.expiresAt });
-        
     } catch (err) {
         res.json({ success: false, error: 'SERVER_ERROR', message: 'אירעה שגיאה' });
     }
@@ -794,33 +487,21 @@ plugin.renderAdmin = function (req, res) {
 
 // ==================== User Profile Phone API ====================
 
-/**
- * קבלת מידע טלפון של משתמש בפרופיל
- */
 plugin.apiGetUserPhoneProfile = async function (req, res) {
     try {
         const { userslug } = req.params;
         const callerUid = req.uid;
-        
-        // מציאת ה-uid לפי slug
         const uid = await User.getUidByUserslug(userslug);
-        if (!uid) {
-            return res.json({ success: false, error: 'USER_NOT_FOUND' });
-        }
+        if (!uid) return res.json({ success: false, error: 'USER_NOT_FOUND' });
         
         const isOwner = parseInt(uid, 10) === parseInt(callerUid, 10);
         const isAdmin = await User.isAdministrator(callerUid);
-        
-        // בדיקת הרשאות צפייה
         const showPhone = await db.getObjectField(`user:${uid}`, 'showPhone');
         const canView = isOwner || isAdmin || showPhone === '1' || showPhone === 1;
         
-        if (!canView) {
-            return res.json({ success: true, phone: null, hidden: true });
-        }
+        if (!canView) return res.json({ success: true, phone: null, hidden: true });
         
         const phoneData = await plugin.getUserPhone(uid);
-        
         res.json({
             success: true,
             phone: phoneData ? phoneData.phone : null,
@@ -829,143 +510,88 @@ plugin.apiGetUserPhoneProfile = async function (req, res) {
             isOwner: isOwner
         });
     } catch (err) {
-        console.error('[phone-verification] Get user phone error:', err);
         res.json({ success: false, error: 'SERVER_ERROR' });
     }
 };
 
-/**
- * עדכון מספר טלפון של משתמש
- */
 plugin.apiUpdateUserPhone = async function (req, res) {
     try {
         const { userslug } = req.params;
         const { phoneNumber } = req.body;
         const callerUid = req.uid;
-        
         const uid = await User.getUidByUserslug(userslug);
-        if (!uid) {
-            return res.json({ success: false, error: 'USER_NOT_FOUND' });
-        }
+        if (!uid) return res.json({ success: false, error: 'USER_NOT_FOUND' });
         
-        // רק הבעלים או אדמין יכולים לעדכן
         const isOwner = parseInt(uid, 10) === parseInt(callerUid, 10);
         const isAdmin = await User.isAdministrator(callerUid);
+        if (!isOwner && !isAdmin) return res.json({ success: false, error: 'UNAUTHORIZED', message: 'אין הרשאה לעדכן' });
         
-        if (!isOwner && !isAdmin) {
-            return res.json({ success: false, error: 'UNAUTHORIZED', message: 'אין הרשאה לעדכן' });
-        }
-        
-        // אם מוחקים את הטלפון
         if (!phoneNumber || phoneNumber.trim() === '') {
-            // מחיקת הטלפון הקיים
             const existingPhone = await plugin.getUserPhone(uid);
             if (existingPhone && existingPhone.phone) {
                 await db.sortedSetRemove('phone:uid', existingPhone.phone);
                 await db.sortedSetRemove('users:phone', uid);
             }
-            await User.setUserFields(uid, {
-                [PHONE_FIELD_KEY]: '',
-                phoneVerified: 0,
-                phoneVerifiedAt: 0
-            });
+            await User.setUserFields(uid, { [PHONE_FIELD_KEY]: '', phoneVerified: 0, phoneVerifiedAt: 0 });
             return res.json({ success: true, message: 'מספר הטלפון הוסר' });
         }
         
-        // ולידציה
-        if (!plugin.validatePhoneNumber(phoneNumber)) {
-            return res.json({ success: false, error: 'PHONE_INVALID', message: 'מספר הטלפון אינו תקין' });
-        }
-        
+        if (!plugin.validatePhoneNumber(phoneNumber)) return res.json({ success: false, error: 'PHONE_INVALID', message: 'מספר הטלפון אינו תקין' });
         const normalizedPhone = plugin.normalizePhone(phoneNumber);
-        
-        // בדיקה אם המספר כבר קיים למשתמש אחר
         const existingUid = await plugin.findUserByPhone(normalizedPhone);
-        if (existingUid && parseInt(existingUid, 10) !== parseInt(uid, 10)) {
-            return res.json({ success: false, error: 'PHONE_EXISTS', message: 'מספר הטלפון כבר רשום למשתמש אחר' });
-        }
+        if (existingUid && parseInt(existingUid, 10) !== parseInt(uid, 10)) return res.json({ success: false, error: 'PHONE_EXISTS', message: 'מספר הטלפון כבר רשום למשתמש אחר' });
         
-        // שמירת הטלפון (לא מאומת עדיין)
         const result = await plugin.savePhoneToUser(uid, normalizedPhone, false);
-        
         if (result.success) {
             res.json({ success: true, message: 'מספר הטלפון נשמר. יש לאמת אותו כדי להשלים את התהליך', needsVerification: true });
         } else {
             res.json(result);
         }
     } catch (err) {
-        console.error('[phone-verification] Update user phone error:', err);
         res.json({ success: false, error: 'SERVER_ERROR' });
     }
 };
 
-/**
- * עדכון הגדרת הצגת הטלפון
- */
 plugin.apiUpdatePhoneVisibility = async function (req, res) {
     try {
         const { userslug } = req.params;
         const { showPhone } = req.body;
         const callerUid = req.uid;
-        
         const uid = await User.getUidByUserslug(userslug);
-        if (!uid) {
-            return res.json({ success: false, error: 'USER_NOT_FOUND' });
-        }
+        if (!uid) return res.json({ success: false, error: 'USER_NOT_FOUND' });
         
-        // רק הבעלים יכול לשנות
         const isOwner = parseInt(uid, 10) === parseInt(callerUid, 10);
-        if (!isOwner) {
-            return res.json({ success: false, error: 'UNAUTHORIZED' });
-        }
+        if (!isOwner) return res.json({ success: false, error: 'UNAUTHORIZED' });
         
         await db.setObjectField(`user:${uid}`, 'showPhone', showPhone ? '1' : '0');
-        
         res.json({ success: true, showPhone: !!showPhone });
     } catch (err) {
-        console.error('[phone-verification] Update phone visibility error:', err);
         res.json({ success: false, error: 'SERVER_ERROR' });
     }
 };
 
-/**
- * אימות טלפון מפרופיל המשתמש
- */
 plugin.apiVerifyUserPhone = async function (req, res) {
     try {
         const { userslug } = req.params;
         const { code } = req.body;
         const callerUid = req.uid;
-        
         const uid = await User.getUidByUserslug(userslug);
-        if (!uid) {
-            return res.json({ success: false, error: 'USER_NOT_FOUND' });
-        }
+        if (!uid) return res.json({ success: false, error: 'USER_NOT_FOUND' });
         
         const isOwner = parseInt(uid, 10) === parseInt(callerUid, 10);
-        if (!isOwner) {
-            return res.json({ success: false, error: 'UNAUTHORIZED' });
-        }
+        if (!isOwner) return res.json({ success: false, error: 'UNAUTHORIZED' });
         
         const phoneData = await plugin.getUserPhone(uid);
-        if (!phoneData || !phoneData.phone) {
-            return res.json({ success: false, error: 'NO_PHONE', message: 'לא נמצא מספר טלפון' });
-        }
+        if (!phoneData || !phoneData.phone) return res.json({ success: false, error: 'NO_PHONE', message: 'לא נמצא מספר טלפון' });
         
         const result = await plugin.verifyCode(phoneData.phone, code);
-        
         if (result.success) {
-            // עדכון שהטלפון מאומת
-            await User.setUserFields(uid, {
-                phoneVerified: 1,
-                phoneVerifiedAt: Date.now()
-            });
+            await User.setUserFields(uid, { phoneVerified: 1, phoneVerifiedAt: Date.now() });
             res.json({ success: true, message: 'מספר הטלפון אומת בהצלחה!' });
         } else {
             res.json(result);
         }
     } catch (err) {
-        console.error('[phone-verification] Verify user phone error:', err);
         res.json({ success: false, error: 'SERVER_ERROR' });
     }
 };
@@ -976,7 +602,6 @@ plugin.apiAdminGetUsers = async function (req, res) {
         const perPage = parseInt(req.query.perPage, 10) || 50;
         const start = (page - 1) * perPage;
         const stop = start + perPage - 1;
-        
         const result = await plugin.getAllUsersWithPhones(start, stop);
         res.json({ 
             success: true, 
@@ -994,14 +619,9 @@ plugin.apiAdminGetUsers = async function (req, res) {
 plugin.apiAdminSearchByPhone = async function (req, res) {
     try {
         const { phone } = req.query;
-        
-        if (!phone) {
-            return res.json({ success: false, error: 'MISSING_PHONE' });
-        }
-        
+        if (!phone) return res.json({ success: false, error: 'MISSING_PHONE' });
         const normalizedPhone = plugin.normalizePhone(phone);
         const uid = await plugin.findUserByPhone(normalizedPhone);
-        
         if (uid) {
             const userData = await plugin.getUserPhone(uid);
             const userInfo = await User.getUserFields(uid, ['username']);
@@ -1017,36 +637,26 @@ plugin.apiAdminSearchByPhone = async function (req, res) {
 plugin.apiAdminGetUserPhone = async function (req, res) {
     try {
         const uid = parseInt(req.params.uid, 10);
-        
-        if (!uid) {
-            return res.json({ success: false, error: 'INVALID_UID' });
-        }
-        
+        if (!uid) return res.json({ success: false, error: 'INVALID_UID' });
         const phoneData = await plugin.getUserPhone(uid);
-        
-        if (phoneData) {
-            res.json({ success: true, ...phoneData });
-        } else {
-            res.json({ success: true, phone: null });
-        }
+        if (phoneData) res.json({ success: true, ...phoneData });
+        else res.json({ success: true, phone: null });
     } catch (err) {
         res.json({ success: false, error: 'SERVER_ERROR' });
     }
 };
 
-/**
- * קבלת הגדרות - Admin API
- */
 plugin.apiAdminGetSettings = async function (req, res) {
     try {
         const settings = await plugin.getSettings();
-        // לא מחזירים את ה-API key המלא מטעמי אבטחה
         res.json({ 
             success: true, 
             settings: {
                 voiceServerUrl: settings.voiceServerUrl,
                 voiceServerApiKey: settings.voiceServerApiKey ? '********' : '',
                 voiceServerEnabled: settings.voiceServerEnabled,
+                // החזרת הערך החדש לממשק
+                blockUnverifiedUsers: settings.blockUnverifiedUsers,
                 hasApiKey: !!settings.voiceServerApiKey
             }
         });
@@ -1055,56 +665,34 @@ plugin.apiAdminGetSettings = async function (req, res) {
     }
 };
 
-/**
- * שמירת הגדרות - Admin API
- */
 plugin.apiAdminSaveSettings = async function (req, res) {
     try {
-        const { voiceServerUrl, voiceServerApiKey, voiceServerEnabled } = req.body;
-        
-        // קבלת הגדרות קיימות
+        const { voiceServerUrl, voiceServerApiKey, voiceServerEnabled, blockUnverifiedUsers } = req.body;
         const currentSettings = await plugin.getSettings();
-        
-        // אם ה-API key הוא ******** לא משנים אותו
         const newApiKey = voiceServerApiKey === '********' ? currentSettings.voiceServerApiKey : voiceServerApiKey;
-        
         await plugin.saveSettings({
             voiceServerUrl: voiceServerUrl || '',
             voiceServerApiKey: newApiKey || '',
-            voiceServerEnabled: voiceServerEnabled === true || voiceServerEnabled === 'true'
+            voiceServerEnabled: voiceServerEnabled === true || voiceServerEnabled === 'true',
+            // קליטת הערך מהטופס
+            blockUnverifiedUsers: blockUnverifiedUsers === true || blockUnverifiedUsers === 'true'
         });
-        
         res.json({ success: true, message: 'ההגדרות נשמרו בהצלחה' });
     } catch (err) {
         res.json({ success: false, error: 'SERVER_ERROR' });
     }
 };
 
-/**
- * בדיקת שיחה קולית - Admin API
- */
 plugin.apiAdminTestCall = async function (req, res) {
     try {
         const { phoneNumber } = req.body;
-        
-        if (!phoneNumber) {
-            return res.json({ success: false, error: 'PHONE_REQUIRED', message: 'חובה להזין מספר טלפון' });
-        }
-        
-        if (!plugin.validatePhoneNumber(phoneNumber)) {
-            return res.json({ success: false, error: 'PHONE_INVALID', message: 'מספר הטלפון אינו תקין' });
-        }
-        
+        if (!phoneNumber) return res.json({ success: false, error: 'PHONE_REQUIRED', message: 'חובה להזין מספר טלפון' });
+        if (!plugin.validatePhoneNumber(phoneNumber)) return res.json({ success: false, error: 'PHONE_INVALID', message: 'מספר הטלפון אינו תקין' });
         const normalizedPhone = plugin.normalizePhone(phoneNumber);
-        const testCode = '123456'; // קוד בדיקה קבוע
-        
+        const testCode = '123456';
         const result = await plugin.sendVoiceCall(normalizedPhone, testCode);
-        
-        if (result.success) {
-            res.json({ success: true, message: 'שיחת בדיקה נשלחה בהצלחה!' });
-        } else {
-            res.json({ success: false, error: result.error, message: result.message });
-        }
+        if (result.success) res.json({ success: true, message: 'שיחת בדיקה נשלחה בהצלחה!' });
+        else res.json({ success: false, error: result.error, message: result.message });
     } catch (err) {
         res.json({ success: false, error: 'SERVER_ERROR', message: 'אירעה שגיאה' });
     }
