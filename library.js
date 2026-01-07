@@ -534,6 +534,7 @@ plugin.init = async function (params) {
     router.post('/api/phone-verification/send-code', middleware.applyCSRF, plugin.apiSendCode);
     router.post('/api/phone-verification/verify-code', middleware.applyCSRF, plugin.apiVerifyCode);
     router.post('/api/phone-verification/initiate-call', middleware.applyCSRF, plugin.apiInitiateCall);
+    router.post('/api/phone-verification/check-status', middleware.applyCSRF, plugin.apiCheckStatus);
     
     // User profile phone routes
     router.get('/api/user/:userslug/phone', middleware.authenticateRequest, plugin.apiGetUserPhoneProfile);
@@ -664,6 +665,9 @@ plugin.apiSendCode = async function (req, res) {
             return res.json(ipCheck);
         }
         
+        // עדכון מונה IP מיד אחרי בדיקת Rate Limit (מונע הצפה גם עם בקשות לא תקינות)
+        await plugin.incrementIpCounter(clientIp);
+        
         if (!phoneNumber) {
             return res.json({ success: false, error: 'PHONE_REQUIRED', message: 'חובה להזין מספר טלפון' });
         }
@@ -684,9 +688,6 @@ plugin.apiSendCode = async function (req, res) {
         if (!saveResult.success) {
             return res.json(saveResult);
         }
-        
-        // עדכון מונה IP רק אחרי שליחה מוצלחת
-        await plugin.incrementIpCounter(clientIp);
         
         // שליחת שיחה קולית
         const voiceResult = await plugin.sendVoiceCall(normalizedPhone, code);
@@ -731,6 +732,27 @@ plugin.apiVerifyCode = async function (req, res) {
         
     } catch (err) {
         res.json({ success: false, error: 'SERVER_ERROR', message: 'אירעה שגיאה' });
+    }
+};
+
+/**
+ * בדיקת סטטוס אימות (למקרה של רענון דף)
+ */
+plugin.apiCheckStatus = async function (req, res) {
+    try {
+        const { phoneNumber } = req.body;
+        
+        if (!phoneNumber) {
+            return res.json({ success: false, verified: false });
+        }
+        
+        const normalizedPhone = plugin.normalizePhone(phoneNumber);
+        const isVerified = await plugin.isPhoneVerified(normalizedPhone);
+        
+        res.json({ success: true, verified: isVerified });
+        
+    } catch (err) {
+        res.json({ success: false, verified: false });
     }
 };
 

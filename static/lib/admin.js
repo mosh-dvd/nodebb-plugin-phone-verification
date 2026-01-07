@@ -4,10 +4,15 @@
 
 define('admin/plugins/phone-verification', [], function () {
     var ACP = {};
+    
+    // משתנים גלובליים ל-Pagination
+    var currentPage = 1;
+    var totalPages = 1;
+    var itemsPerPage = 50;
 
     ACP.init = function () {
         loadSettings();
-        loadUsers();
+        loadUsers(1);
         
         // שמירת הגדרות
         $('#voice-settings-form').on('submit', function (e) {
@@ -109,20 +114,62 @@ define('admin/plugins/phone-verification', [], function () {
         });
     }
     
-    function loadUsers() {
+    function loadUsers(page) {
+        page = page || 1;
+        currentPage = page;
+        
+        var start = (page - 1) * itemsPerPage;
+        var stop = start + itemsPerPage - 1;
+        
         $.ajax({
             url: config.relative_path + '/api/admin/plugins/phone-verification/users',
             method: 'GET',
+            data: { start: start, stop: stop },
             success: function (response) {
                 if (response.success) {
                     renderUsers(response.users);
-                    updateStats(response.users);
+                    updateStats(response.total, response.users);
+                    totalPages = Math.ceil(response.total / itemsPerPage) || 1;
+                    renderPagination();
                 } else {
                     showTableError('שגיאה בטעינת הנתונים');
                 }
             },
             error: function () {
                 showTableError('שגיאה בטעינת הנתונים');
+            }
+        });
+    }
+    
+    function renderPagination() {
+        var $pagination = $('#users-pagination');
+        $pagination.empty();
+        
+        if (totalPages <= 1) return;
+        
+        // כפתור הקודם
+        var prevDisabled = currentPage === 1 ? 'disabled' : '';
+        $pagination.append('<li class="page-item ' + prevDisabled + '"><a class="page-link" href="#" data-page="' + (currentPage - 1) + '">&laquo; הקודם</a></li>');
+        
+        // מספרי עמודים
+        var startPage = Math.max(1, currentPage - 2);
+        var endPage = Math.min(totalPages, currentPage + 2);
+        
+        for (var i = startPage; i <= endPage; i++) {
+            var active = i === currentPage ? 'active' : '';
+            $pagination.append('<li class="page-item ' + active + '"><a class="page-link" href="#" data-page="' + i + '">' + i + '</a></li>');
+        }
+        
+        // כפתור הבא
+        var nextDisabled = currentPage === totalPages ? 'disabled' : '';
+        $pagination.append('<li class="page-item ' + nextDisabled + '"><a class="page-link" href="#" data-page="' + (currentPage + 1) + '">הבא &raquo;</a></li>');
+        
+        // האזנה לקליקים
+        $pagination.find('a').off('click').on('click', function(e) {
+            e.preventDefault();
+            var page = $(this).data('page');
+            if (page > 0 && page <= totalPages && page !== currentPage) {
+                loadUsers(page);
             }
         });
     }
@@ -154,8 +201,8 @@ define('admin/plugins/phone-verification', [], function () {
         });
     }
     
-    function updateStats(users) {
-        $('#total-users').text(users.length);
+    function updateStats(total, users) {
+        $('#total-users').text(total || users.length);
         var verified = users.filter(function (u) { return u.phoneVerified; }).length;
         $('#verified-count').text(verified);
     }

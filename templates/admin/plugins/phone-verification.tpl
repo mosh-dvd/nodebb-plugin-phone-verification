@@ -127,6 +127,11 @@
                         </table>
                     </div>
                     
+                    <!-- Pagination -->
+                    <nav aria-label="ניווט עמודים" class="text-center">
+                        <ul class="pagination" id="users-pagination"></ul>
+                    </nav>
+                    
                 </div>
             </div>
         </div>

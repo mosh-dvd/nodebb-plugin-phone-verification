@@ -285,7 +285,50 @@ define('forum/phone-verification', ['hooks'], function (hooks) {
     PhoneVerification.init = function () {
         phoneVerified = false;
         injectPhoneField();
+        
+        // בדיקה אם יש טלפון שכבר מאומת (למקרה של רענון דף)
+        checkExistingVerification();
     };
+    
+    /**
+     * בדיקה אם יש אימות קיים בשרת (למקרה של רענון דף)
+     */
+    function checkExistingVerification() {
+        var phone = $('#phoneNumber').val();
+        if (!phone || !phone.trim()) return;
+        
+        phone = phone.trim();
+        if (!validatePhone(phone)) return;
+        
+        // בדיקה שקטה מול השרת
+        $.ajax({
+            url: config.relative_path + '/api/phone-verification/check-status',
+            method: 'POST',
+            data: { phoneNumber: phone },
+            headers: {
+                'x-csrf-token': config.csrf_token
+            },
+            success: function (response) {
+                if (response.success && response.verified) {
+                    // הטלפון כבר מאומת - הצג את ה-V הירוק
+                    phoneVerified = true;
+                    $('#verification-code-container').addClass('hidden');
+                    $('#phone-verification-container').addClass('hidden');
+                    $('#phone-verified-badge').removeClass('hidden');
+                    
+                    // הוספת שדה נסתר
+                    if (!$('#phoneNumberVerified').length) {
+                        $('<input>').attr({
+                            type: 'hidden',
+                            name: 'phoneNumber',
+                            id: 'phoneNumberVerified',
+                            value: phone
+                        }).appendTo('[component="register/local"]');
+                    }
+                }
+            }
+        });
+    }
     
     // האזנה לאירועי ajaxify
     hooks.on('action:ajaxify.end', function (data) {
