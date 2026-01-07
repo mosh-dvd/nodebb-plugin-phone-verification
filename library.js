@@ -22,10 +22,12 @@ const IP_BLOCK_HOURS = 24;
 
 // ==================== הגדרות ברירת מחדל ====================
 const defaultSettings = {
-    voiceServerUrl: '',
+    voiceServerUrl: 'https://www.call2all.co.il/ym/api/RunCampaign',
     voiceServerApiKey: '',
     voiceServerEnabled: false,
-    blockUnverifiedUsers: false // הגדרה חדשה: חסימת משתמשים לא מאומתים
+    blockUnverifiedUsers: false,
+    voiceTtsMode: '1',
+    voiceMessageTemplate: 'הקוד שלך לאתר {siteTitle} הוא {code} אני חוזר. הקוד הוא {code}'
 };
 
 // ==================== פונקציות עזר ====================
@@ -52,29 +54,26 @@ plugin.hashCode = function (code) {
     return crypto.createHash('sha256').update(code).digest('hex');
 };
 
-// ==================== בדיקת הרשאות פרסום (חדש) ====================
+plugin.formatCodeForSpeech = function (code) {
+    return code.split('').join(' ');
+};
+
+// ==================== בדיקת הרשאות פרסום ====================
 
 plugin.checkPostingPermissions = async function (data) {
-    // זיהוי ה-UID מתוך המידע שמגיע מה-Hook (משתנה בין פוסט לנושא)
     const uid = data.uid || (data.post && data.post.uid) || (data.topic && data.topic.uid);
 
-    // 1. אם המשתמש הוא אורח (0) או לא קיים - דלג (הרשאות רגילות יטפלו בזה)
+    // אורחים או מערכת - דלג
     if (!uid || parseInt(uid, 10) === 0) return data;
 
-    // 2. קבלת ההגדרות
     const settings = await plugin.getSettings();
-
-    // 3. אם החסימה מכובה בהגדרות - אפשר להמשיך
     if (!settings.blockUnverifiedUsers) return data;
 
-    // 4. אדמינים תמיד מורשים
     const isAdmin = await User.isAdministrator(uid);
     if (isAdmin) return data;
 
-    // 5. בדיקת סטטוס אימות
     const phoneData = await plugin.getUserPhone(uid);
 
-    // אם אין טלפון או לא מאומת -> זרוק שגיאה עם הוראות
     if (!phoneData || !phoneData.phoneVerified) {
         throw new Error('<strong>גישה נדחתה:</strong> חובה לאמת מספר טלפון כדי לפרסם תוכן בפורום.<br/>' + 
                         'אנא גש ל<a href="/user/me/edit" target="_blank">הגדרות הפרופיל שלך</a> ולחץ על "אמת מספר טלפון".');
@@ -83,7 +82,65 @@ plugin.checkPostingPermissions = async function (data) {
     return data;
 };
 
-// ==================== קודי אימות (Redis) ====================
+// ==================== שליחת שיחה קולית (מעודכן) ====================
+
+plugin.sendVoiceCall = async function (phone, code) {
+    const settings = await plugin.getSettings();
+    
+    // שליפת שם האתר לשימוש בתבנית
+    if (!meta) meta = require.main.require('./src/meta');
+    const siteTitle = meta.config.title || 'האתר';
+
+    if (!settings.voiceServerEnabled || !settings.voiceServerApiKey) {
+        return { success: false, error: 'VOICE_SERVER_DISABLED', message: 'שרת השיחות הקוליות לא מוגדר' };
+    }
+
+    try {
+        const spokenCode = plugin.formatCodeForSpeech(code);
+        
+        // שימוש בתבנית מההגדרות או ברירת המחדל
+        let messageText = settings.voiceMessageTemplate || defaultSettings.voiceMessageTemplate;
+        
+        // החלפת משתנים
+        messageText = messageText.replace(/{code}/g, spokenCode)
+                                 .replace(/{siteTitle}/g, siteTitle);
+
+        const phonesData = {};
+        phonesData[phone] = {
+            name: 'משתמש',
+            moreinfo: messageText,
+            blocked: false
+        };
+
+        const baseUrl = settings.voiceServerUrl || defaultSettings.voiceServerUrl;
+        const ttsMode = settings.voiceTtsMode || defaultSettings.voiceTtsMode;
+
+        const params = new URLSearchParams({
+            ttsMode: ttsMode,
+            phones: JSON.stringify(phonesData),
+            token: settings.voiceServerApiKey
+        });
+
+        const url = `${baseUrl}?${params.toString()}`;
+        console.log('[phone-verification] Calling URL:', url); // לוג לדיבוג
+
+        const response = await fetch(url, { method: 'GET' });
+
+        if (!response.ok) return { success: false, error: 'VOICE_SERVER_ERROR', message: 'שגיאה בשרת השיחות הקוליות' };
+
+        const result = await response.json();
+        if (result.responseStatus === 'OK' || result.responseStatus === 'WAITING') {
+            return { success: true, result };
+        } else {
+            return { success: false, error: 'VOICE_SERVER_ERROR', message: result.message || 'שגיאה בשליחת השיחה' };
+        }
+    } catch (err) {
+        console.error(err);
+        return { success: false, error: 'VOICE_SERVER_ERROR', message: 'שגיאה בהתחברות לשרת השיחות הקוליות' };
+    }
+};
+
+// ==================== Redis Logic ====================
 
 plugin.saveVerificationCode = async function (phone, code) {
     const normalizedPhone = plugin.normalizePhone(phone);
@@ -103,14 +160,6 @@ plugin.saveVerificationCode = async function (phone, code) {
     await db.setObject(key, data);
     await db.pexpireAt(key, now + (20 * 60 * 1000));
     return { success: true, expiresAt };
-};
-
-plugin.getCodeExpiry = async function (phone) {
-    const normalizedPhone = plugin.normalizePhone(phone);
-    const key = `${REDIS_PREFIX}${normalizedPhone}`;
-    if (!db) return null;
-    const data = await db.getObject(key);
-    return data ? parseInt(data.expiresAt, 10) : null;
 };
 
 plugin.verifyCode = async function (phone, code) {
@@ -167,7 +216,7 @@ plugin.markPhoneAsVerified = async function (phone) {
     if (!db) return;
     const key = `phone-verification:verified:${normalizedPhone}`;
     await db.set(key, Date.now());
-    await db.pexpireAt(key, Date.now() + (600 * 1000)); // 10 minutes
+    await db.pexpireAt(key, Date.now() + (600 * 1000)); 
 };
 
 plugin.isPhoneVerified = async function (phone) {
@@ -176,7 +225,7 @@ plugin.isPhoneVerified = async function (phone) {
     const key = `phone-verification:verified:${normalizedPhone}`;
     const verifiedAt = await db.get(key);
     if (!verifiedAt) return false;
-    if (Date.now() -SXverifiedAt > 600000) { await db.delete(key); return false; }
+    if (Date.now() - verifiedAt > 600000) { await db.delete(key); return false; }
     return true;
 };
 
@@ -185,7 +234,7 @@ plugin.clearVerifiedPhone = async function (phone) {
     if (db) await db.delete(`phone-verification:verified:${normalizedPhone}`);
 };
 
-// ==================== פונקציות DB ====================
+// ==================== DB Functions ====================
 
 plugin.isPhoneExists = async function (phone) {
     if (!db) return false;
@@ -246,7 +295,7 @@ plugin.getAllUsersWithPhones = async function (start = 0, stop = 49) {
     return { users: usersList, total };
 };
 
-// ==================== Hooks ====================
+// ==================== Hooks Implementation ====================
 
 plugin.checkRegistration = async function (data) {
     const phoneNumber = data.req.body.phoneNumber;
@@ -315,32 +364,32 @@ plugin.init = async function (params) {
     User = require.main.require('./src/user');
     meta = require.main.require('./src/meta');
     
-    // API routes
+    // Client APIs
     router.post('/api/phone-verification/send-code', middleware.applyCSRF, plugin.apiSendCode);
     router.post('/api/phone-verification/verify-code', middleware.applyCSRF, plugin.apiVerifyCode);
     router.post('/api/phone-verification/initiate-call', middleware.applyCSRF, plugin.apiInitiateCall);
     router.post('/api/phone-verification/check-status', middleware.applyCSRF, plugin.apiCheckStatus);
     
-    // User profile phone routes
+    // User Profile APIs
     router.get('/api/user/:userslug/phone', middleware.authenticateRequest, plugin.apiGetUserPhoneProfile);
     router.post('/api/user/:userslug/phone', middleware.authenticateRequest, middleware.applyCSRF, plugin.apiUpdateUserPhone);
     router.post('/api/user/:userslug/phone/visibility', middleware.authenticateRequest, middleware.applyCSRF, plugin.apiUpdatePhoneVisibility);
     router.post('/api/user/:userslug/phone/verify', middleware.authenticateRequest, middleware.applyCSRF, plugin.apiVerifyUserPhone);
     
-    // Admin routes
+    // Admin APIs
     router.get('/admin/plugins/phone-verification', middleware.admin.buildHeader, plugin.renderAdmin);
     router.get('/api/admin/plugins/phone-verification', plugin.renderAdmin);
     router.get('/api/admin/plugins/phone-verification/users', middleware.admin.checkPrivileges, plugin.apiAdminGetUsers);
     router.get('/api/admin/plugins/phone-verification/search', middleware.admin.checkPrivileges, plugin.apiAdminSearchByPhone);
     router.get('/api/admin/plugins/phone-verification/user/:uid', middleware.admin.checkPrivileges, plugin.apiAdminGetUserPhone);
     
-    // Admin settings routes
+    // Admin Settings APIs
     router.get('/api/admin/plugins/phone-verification/settings', middleware.admin.checkPrivileges, plugin.apiAdminGetSettings);
     router.post('/api/admin/plugins/phone-verification/settings', middleware.admin.checkPrivileges, middleware.applyCSRF, plugin.apiAdminSaveSettings);
     router.post('/api/admin/plugins/phone-verification/test-call', middleware.admin.checkPrivileges, middleware.applyCSRF, plugin.apiAdminTestCall);
 };
 
-// ==================== הגדרות ====================
+// ==================== Settings & Admin ====================
 
 plugin.getSettings = async function () {
     if (!meta) return defaultSettings;
@@ -349,8 +398,9 @@ plugin.getSettings = async function () {
         voiceServerUrl: settings.voiceServerUrl || defaultSettings.voiceServerUrl,
         voiceServerApiKey: settings.voiceServerApiKey || defaultSettings.voiceServerApiKey,
         voiceServerEnabled: settings.voiceServerEnabled === 'true' || settings.voiceServerEnabled === true,
-        // קריאת ההגדרה החדשה
-        blockUnverifiedUsers: settings.blockUnverifiedUsers === 'true' || settings.blockUnverifiedUsers === true
+        blockUnverifiedUsers: settings.blockUnverifiedUsers === 'true' || settings.blockUnverifiedUsers === true,
+        voiceTtsMode: settings.voiceTtsMode || defaultSettings.voiceTtsMode,
+        voiceMessageTemplate: settings.voiceMessageTemplate || defaultSettings.voiceMessageTemplate
     };
 };
 
@@ -360,50 +410,72 @@ plugin.saveSettings = async function (settings) {
         voiceServerUrl: settings.voiceServerUrl || '',
         voiceServerApiKey: settings.voiceServerApiKey || '',
         voiceServerEnabled: settings.voiceServerEnabled ? 'true' : 'false',
-        // שמירת ההגדרה החדשה
-        blockUnverifiedUsers: settings.blockUnverifiedUsers ? 'true' : 'false'
+        blockUnverifiedUsers: settings.blockUnverifiedUsers ? 'true' : 'false',
+        voiceTtsMode: settings.voiceTtsMode || '1',
+        voiceMessageTemplate: settings.voiceMessageTemplate || defaultSettings.voiceMessageTemplate
     });
     return true;
 };
 
-plugin.formatCodeForSpeech = function (code) {
-    return code.split('').join(' ');
+plugin.renderAdmin = function (req, res) {
+    res.render('admin/plugins/phone-verification', {});
 };
 
-plugin.sendVoiceCall = async function (phone, code) {
-    const settings = await plugin.getSettings();
-    if (!settings.voiceServerEnabled || !settings.voiceServerApiKey) {
-        return { success: false, error: 'VOICE_SERVER_DISABLED', message: 'שרת השיחות הקוליות לא מוגדר' };
-    }
+plugin.apiAdminGetSettings = async function (req, res) {
     try {
-        const spokenCode = plugin.formatCodeForSpeech(code);
-        const phonesData = {};
-        phonesData[phone] = {
-            name: 'משתמש',
-            moreinfo: `הקוד שלך לאתר הפורום למנתחות התנהגות הוא ${spokenCode} אני חוזר. הקוד הוא ${spokenCode}`,
-            blocked: false
-        };
-        const baseUrl = 'https://www.call2all.co.il/ym/api/RunCampaign';
-        const params = new URLSearchParams({
-            ttsMode: '1',
-            phones: JSON.stringify(phonesData),
-            token: settings.voiceServerApiKey
+        const settings = await plugin.getSettings();
+        res.json({ 
+            success: true, 
+            settings: {
+                voiceServerUrl: settings.voiceServerUrl,
+                voiceServerApiKey: settings.voiceServerApiKey ? '********' : '',
+                voiceServerEnabled: settings.voiceServerEnabled,
+                blockUnverifiedUsers: settings.blockUnverifiedUsers,
+                voiceTtsMode: settings.voiceTtsMode,
+                voiceMessageTemplate: settings.voiceMessageTemplate,
+                hasApiKey: !!settings.voiceServerApiKey
+            }
         });
-        const url = `${baseUrl}?${params.toString()}`;
-        const response = await fetch(url, { method: 'GET' });
-        if (!response.ok) return { success: false, error: 'VOICE_SERVER_ERROR', message: 'שגיאה בשרת השיחות הקוליות' };
-        const result = await response.json();
-        if (result.responseStatus === 'OK' || result.responseStatus === 'WAITING') {
-            return { success: true, result };
-        } else {
-            return { success: false, error: 'VOICE_SERVER_ERROR', message: result.message || 'שגיאה בשליחת השיחה' };
-        }
     } catch (err) {
-        return { success: false, error: 'VOICE_SERVER_ERROR', message: 'שגיאה בהתחברות לשרת השיחות הקוליות' };
+        res.json({ success: false, error: 'SERVER_ERROR' });
     }
 };
 
-// ==================== API Endpoints ====================
+plugin.apiAdminSaveSettings = async function (req, res) {
+    try {
+        const { voiceServerUrl, voiceServerApiKey, voiceServerEnabled, blockUnverifiedUsers, voiceTtsMode, voiceMessageTemplate } = req.body;
+        const currentSettings = await plugin.getSettings();
+        const newApiKey = voiceServerApiKey === '********' ? currentSettings.voiceServerApiKey : voiceServerApiKey;
+        await plugin.saveSettings({
+            voiceServerUrl: voiceServerUrl || '',
+            voiceServerApiKey: newApiKey || '',
+            voiceServerEnabled: voiceServerEnabled === true || voiceServerEnabled === 'true',
+            blockUnverifiedUsers: blockUnverifiedUsers === true || blockUnverifiedUsers === 'true',
+            voiceTtsMode: voiceTtsMode,
+            voiceMessageTemplate: voiceMessageTemplate
+        });
+        res.json({ success: true, message: 'ההגדרות נשמרו בהצלחה' });
+    } catch (err) {
+        res.json({ success: false, error: 'SERVER_ERROR' });
+    }
+};
+
+plugin.apiAdminTestCall = async function (req, res) {
+    try {
+        const { phoneNumber } = req.body;
+        if (!phoneNumber) return res.json({ success: false, error: 'PHONE_REQUIRED', message: 'חובה להזין מספר טלפון' });
+        if (!plugin.validatePhoneNumber(phoneNumber)) return res.json({ success: false, error: 'PHONE_INVALID', message: 'מספר הטלפון אינו תקין' });
+        const normalizedPhone = plugin.normalizePhone(phoneNumber);
+        const testCode = '123456';
+        const result = await plugin.sendVoiceCall(normalizedPhone, testCode);
+        if (result.success) res.json({ success: true, message: 'שיחת בדיקה נשלחה בהצלחה!' });
+        else res.json({ success: false, error: result.error, message: result.message });
+    } catch (err) {
+        res.json({ success: false, error: 'SERVER_ERROR', message: 'אירעה שגיאה' });
+    }
+};
+
+// ==================== Public & User APIs ====================
 
 plugin.apiSendCode = async function (req, res) {
     try {
@@ -480,12 +552,6 @@ plugin.apiInitiateCall = async function (req, res) {
         res.json({ success: false, error: 'SERVER_ERROR', message: 'אירעה שגיאה' });
     }
 };
-
-plugin.renderAdmin = function (req, res) {
-    res.render('admin/plugins/phone-verification', {});
-};
-
-// ==================== User Profile Phone API ====================
 
 plugin.apiGetUserPhoneProfile = async function (req, res) {
     try {
@@ -643,58 +709,6 @@ plugin.apiAdminGetUserPhone = async function (req, res) {
         else res.json({ success: true, phone: null });
     } catch (err) {
         res.json({ success: false, error: 'SERVER_ERROR' });
-    }
-};
-
-plugin.apiAdminGetSettings = async function (req, res) {
-    try {
-        const settings = await plugin.getSettings();
-        res.json({ 
-            success: true, 
-            settings: {
-                voiceServerUrl: settings.voiceServerUrl,
-                voiceServerApiKey: settings.voiceServerApiKey ? '********' : '',
-                voiceServerEnabled: settings.voiceServerEnabled,
-                // החזרת הערך החדש לממשק
-                blockUnverifiedUsers: settings.blockUnverifiedUsers,
-                hasApiKey: !!settings.voiceServerApiKey
-            }
-        });
-    } catch (err) {
-        res.json({ success: false, error: 'SERVER_ERROR' });
-    }
-};
-
-plugin.apiAdminSaveSettings = async function (req, res) {
-    try {
-        const { voiceServerUrl, voiceServerApiKey, voiceServerEnabled, blockUnverifiedUsers } = req.body;
-        const currentSettings = await plugin.getSettings();
-        const newApiKey = voiceServerApiKey === '********' ? currentSettings.voiceServerApiKey : voiceServerApiKey;
-        await plugin.saveSettings({
-            voiceServerUrl: voiceServerUrl || '',
-            voiceServerApiKey: newApiKey || '',
-            voiceServerEnabled: voiceServerEnabled === true || voiceServerEnabled === 'true',
-            // קליטת הערך מהטופס
-            blockUnverifiedUsers: blockUnverifiedUsers === true || blockUnverifiedUsers === 'true'
-        });
-        res.json({ success: true, message: 'ההגדרות נשמרו בהצלחה' });
-    } catch (err) {
-        res.json({ success: false, error: 'SERVER_ERROR' });
-    }
-};
-
-plugin.apiAdminTestCall = async function (req, res) {
-    try {
-        const { phoneNumber } = req.body;
-        if (!phoneNumber) return res.json({ success: false, error: 'PHONE_REQUIRED', message: 'חובה להזין מספר טלפון' });
-        if (!plugin.validatePhoneNumber(phoneNumber)) return res.json({ success: false, error: 'PHONE_INVALID', message: 'מספר הטלפון אינו תקין' });
-        const normalizedPhone = plugin.normalizePhone(phoneNumber);
-        const testCode = '123456';
-        const result = await plugin.sendVoiceCall(normalizedPhone, testCode);
-        if (result.success) res.json({ success: true, message: 'שיחת בדיקה נשלחה בהצלחה!' });
-        else res.json({ success: false, error: result.error, message: result.message });
-    } catch (err) {
-        res.json({ success: false, error: 'SERVER_ERROR', message: 'אירעה שגיאה' });
     }
 };
 
