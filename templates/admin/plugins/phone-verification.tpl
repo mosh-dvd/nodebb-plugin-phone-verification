@@ -99,14 +99,24 @@
                     <h3 class="panel-title"><i class="fa fa-phone"></i> ניהול אימות טלפון</h3>
                 </div>
                 <div class="panel-body">
+                    
                     <div class="well">
-                        <h4>חיפוש משתמש לפי מספר טלפון</h4>
-                        <div class="form-group">
-                            <div class="input-group">
-                                <input type="text" class="form-control" id="phone-search" placeholder="הזן מספר טלפון" dir="ltr">
-                                <span class="input-group-btn">
-                                    <button class="btn btn-primary" type="button" id="search-btn"><i class="fa fa-search"></i> חפש</button>
-                                </span>
+                        <div class="row">
+                            <div class="col-md-6">
+                                <h4>חיפוש משתמש לפי מספר טלפון</h4>
+                                <div class="form-group">
+                                    <div class="input-group">
+                                        <input type="text" class="form-control" id="phone-search" placeholder="הזן מספר טלפון" dir="ltr">
+                                        <span class="input-group-btn">
+                                            <button class="btn btn-primary" type="button" id="search-btn"><i class="fa fa-search"></i> חפש</button>
+                                        </span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-md-6 text-left" style="padding-top: 35px;">
+                                <button class="btn btn-success" id="btn-add-manual-user">
+                                    <i class="fa fa-plus"></i> הוסף משתמש מאומת ידנית
+                                </button>
                             </div>
                         </div>
                         <div id="search-result" style="display:none;"><div class="alert" id="search-alert"></div></div>
@@ -119,13 +129,30 @@
                                 <div class="panel-body text-center"><h2 id="total-users">0</h2></div>
                             </div>
                         </div>
+                        <div class="col-md-4">
+                            <div class="panel panel-success">
+                                <div class="panel-heading"><h4 class="panel-title">משתמשים מאומתים</h4></div>
+                                <div class="panel-body text-center"><h2 id="verified-count">0</h2></div>
+                            </div>
+                        </div>
                     </div>
                     
                     <h4>רשימת משתמשים</h4>
                     <div class="table-responsive">
                         <table class="table table-striped table-hover" id="users-table">
-                            <thead><tr><th>מזהה משתמש</th><th>מספר טלפון</th><th>תאריך אימות</th><th>סטטוס</th></tr></thead>
-                            <tbody id="users-tbody"><tr><td colspan="4" class="text-center">טוען...</td></tr></tbody>
+                            <thead>
+                                <tr>
+                                    <th>מזהה (UID)</th>
+                                    <th>שם משתמש</th>
+                                    <th>מספר טלפון</th>
+                                    <th>תאריך אימות</th>
+                                    <th>סטטוס</th>
+                                    <th class="text-right">פעולות לניהול</th>
+                                </tr>
+                            </thead>
+                            <tbody id="users-tbody">
+                                <tr><td colspan="6" class="text-center">טוען...</td></tr>
+                            </tbody>
                         </table>
                     </div>
                     <nav aria-label="ניווט עמודים" class="text-center"><ul class="pagination" id="users-pagination"></ul></nav>
@@ -134,3 +161,141 @@
         </div>
     </div>
 </div>
+
+<script>
+require(['settings', 'admin/modules/selectable', 'bootbox'], function(Settings, Selectable, bootbox) {
+    
+    // --- הוספת משתמש ידנית ---
+    $('#btn-add-manual-user').on('click', function() {
+        bootbox.prompt("הזן את <b>שם המשתמש</b> שברצונך להוסיף לרשימת המאומתים:", function(username) {
+            if (!username) return;
+
+            // המרת שם משתמש ל-UID
+            socket.emit('user.getUidByUsersname', username, function(err, uid) {
+                if (err || !uid) {
+                    return app.alertError('משתמש בשם "' + username + '" לא נמצא במערכת.');
+                }
+
+                // בקשת מספר טלפון (אופציונלי)
+                bootbox.prompt({
+                    title: "הזן מספר טלפון עבור " + username + " (אופציונלי)",
+                    message: "<small>השאר ריק אם ברצונך לאמת את המשתמש ללא מספר טלפון</small>",
+                    inputType: 'text',
+                    callback: function(phone) {
+                        // יצירת הודעת אישור מסכמת
+                        var confirmMsg = "<h4>סיכום פעולה</h4>" +
+                                         "<b>שם משתמש:</b> " + username + "<br/>" +
+                                         "<b>מספר טלפון:</b> " + (phone ? phone : "ללא מספר (יוגדר כמאומת)") + "<br/><br/>" +
+                                         "האם אתה בטוח שברצונך להמשיך?";
+
+                        bootbox.confirm(confirmMsg, function(result) {
+                            if (result) {
+                                socket.emit('plugins.call2all.adminAddVerifiedUser', { uid: uid, phone: phone }, function(err) {
+                                    if (err) return app.alertError(err.message);
+                                    app.alertSuccess('המשתמש ' + username + ' הוגדר כמאומת בהצלחה!');
+                                    ajaxify.refresh(); 
+                                });
+                            }
+                        });
+                    }
+                });
+            });
+        });
+    });
+
+    // --- בניית שורות הטבלה ---
+    window.buildUserRow = function(user) {
+        // הכנה של שם המשתמש לתצוגה ולהודעות
+        // אנו מניחים שהשרת מחזיר user.username, אם לא - משתמשים ב-UID
+        var displayName = user.username || ('משתמש ' + user.uid);
+        var safeName = displayName.replace(/"/g, '&quot;'); // מניעת שבירת HTML
+
+        var userLink = '/admin/manage/users?searchBy=uid&query=' + user.uid + '&page=1&sortBy=lastonline';
+        
+        var statusBadge = user.verified 
+            ? '<span class="label label-success">מאומת</span>' 
+            : '<span class="label label-warning">ממתין לאימות</span>';
+
+        var actionsHtml = '<div class="btn-group pull-right">';
+        
+        // כפתור אימות / ביטול אימות
+        if (!user.verified) {
+             actionsHtml += '<button class="btn btn-xs btn-success verify-user-btn" data-uid="' + user.uid + '" data-name="' + safeName + '" title="אמת ידנית"><i class="fa fa-check"></i></button>';
+        } else {
+             actionsHtml += '<button class="btn btn-xs btn-warning unverify-user-btn" data-uid="' + user.uid + '" data-name="' + safeName + '" title="בטל אימות"><i class="fa fa-ban"></i></button>';
+        }
+        
+        // כפתור מחיקה
+        actionsHtml += '<button class="btn btn-xs btn-danger delete-phone-btn" data-uid="' + user.uid + '" data-name="' + safeName + '" title="מחק טלפון"><i class="fa fa-trash"></i></button>';
+        actionsHtml += '</div>';
+
+        // תצוגת טלפון
+        var displayPhone = user.phone ? user.phone : '<span class="text-muted">-- ללא --</span>';
+
+        return '<tr>' +
+            '<td>' + user.uid + '</td>' +
+            '<td><a href="' + userLink + '" target="_blank"><strong>' + displayName + '</strong></a></td>' +
+            '<td dir="ltr">' + displayPhone + '</td>' +
+            '<td>' + (user.verifiedAt ? new Date(user.verifiedAt).toLocaleString() : '-') + '</td>' +
+            '<td>' + statusBadge + '</td>' +
+            '<td>' + actionsHtml + '</td>' +
+        '</tr>';
+    };
+
+    // --- לוגיקת כפתורים בטבלה ---
+
+    // 1. אימות ידני (למשתמש קיים בטבלה שאינו מאומת)
+    $('body').on('click', '.verify-user-btn', function() {
+        var uid = $(this).data('uid');
+        var name = $(this).data('name');
+        
+        var msg = "האם אתה בטוח שברצונך לאמת ידנית את המשתמש <b>" + name + "</b>?<br>הוא יסומן כמאומת באופן מיידי.";
+        
+        bootbox.confirm(msg, function(result) {
+            if (result) {
+                socket.emit('plugins.call2all.adminVerifyUser', { uid: uid }, function(err) {
+                    if (err) return app.alertError(err.message);
+                    app.alertSuccess('המשתמש ' + name + ' אומת!');
+                    ajaxify.refresh();
+                });
+            }
+        });
+    });
+
+    // 2. ביטול אימות
+    $('body').on('click', '.unverify-user-btn', function() {
+        var uid = $(this).data('uid');
+        var name = $(this).data('name');
+        
+        var msg = "האם אתה בטוח שברצונך <b>לבטל את האימות</b> עבור המשתמש <b>" + name + "</b>?<br>המשתמש יהפוך ל'לא מאומת'.";
+
+        bootbox.confirm(msg, function(result) {
+            if (result) {
+                socket.emit('plugins.call2all.adminUnverifyUser', { uid: uid }, function(err) {
+                    if (err) return app.alertError(err.message);
+                    app.alertSuccess('האימות של ' + name + ' בוטל!');
+                    ajaxify.refresh();
+                });
+            }
+        });
+    });
+
+    // 3. מחיקת טלפון (הסרה מהרשימה)
+    $('body').on('click', '.delete-phone-btn', function() {
+        var uid = $(this).data('uid');
+        var name = $(this).data('name');
+        
+        var msg = "<h4>אזהרה</h4>האם אתה בטוח שברצונך <b>למחוק את רשומת הטלפון</b> של המשתמש <b>" + name + "</b>?<br/>פעולה זו תסיר אותו לחלוטין מהרשימה.";
+
+        bootbox.confirm(msg, function(result) {
+            if (result) {
+                socket.emit('plugins.call2all.adminDeleteUserPhone', { uid: uid }, function(err) {
+                    if (err) return app.alertError(err.message);
+                    app.alertSuccess('המשתמש ' + name + ' הוסר מהרשימה בהצלחה!');
+                    ajaxify.refresh();
+                });
+            }
+        });
+    });
+});
+</script>
