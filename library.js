@@ -488,16 +488,34 @@ plugin.apiAdminTestCall = async function (req, res) {
 plugin.apiSendCode = async function (req, res) {
     try {
         const { phoneNumber } = req.body;
+        // שליפת ה-ID של המשתמש הנוכחי (אם מחובר)
+        const callerUid = req.uid ? parseInt(req.uid, 10) : 0;
+        
         const clientIp = req.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress;
         const ipCheck = await plugin.checkIpRateLimit(clientIp);
         if (!ipCheck.allowed) return res.json(ipCheck);
         await plugin.incrementIpCounter(clientIp);
         
         if (!phoneNumber) return res.json({ success: false, error: 'PHONE_REQUIRED', message: 'חובה להזין מספר טלפון' });
-        if (!plugin.validatePhoneNumber(phoneNumber)) return res.json({ success: false, error: 'PHONE_INVALID', message: 'מספר הטלפון אינו תקין' });
         
-        const normalizedPhone = plugin.normalizePhone(phoneNumber);
-        if (await plugin.isPhoneExists(normalizedPhone)) return res.json({ success: false, error: 'PHONE_EXISTS', message: 'מספר הטלפון כבר רשום במערכת' });
+        let cleanPhone = phoneNumber.replace(/\D/g, '');
+        if (cleanPhone.startsWith('972')) cleanPhone = '0' + cleanPhone.substring(3);
+        if (cleanPhone.length === 9 && cleanPhone.startsWith('5')) cleanPhone = '0' + cleanPhone;
+        
+        // בדיקת תקינות בסיסית
+        if (!/^05\d{8}$/.test(cleanPhone)) {
+             return res.json({ success: false, error: 'PHONE_INVALID', message: 'מספר הטלפון אינו תקין' });
+        }
+        
+        const normalizedPhone = cleanPhone; // המספר כבר נקי
+
+        const existingUid = await plugin.findUserByPhone(normalizedPhone);
+        
+        if (existingUid) {
+            if (callerUid === 0 || existingUid !== callerUid) {
+                 return res.json({ success: false, error: 'PHONE_EXISTS', message: 'מספר הטלפון כבר רשום במערכת' });
+            }
+        }
         
         const code = plugin.generateVerificationCode();
         const saveResult = await plugin.saveVerificationCode(normalizedPhone, code);
@@ -516,6 +534,7 @@ plugin.apiSendCode = async function (req, res) {
         }
         res.json(response);
     } catch (err) {
+        console.error(err);
         res.json({ success: false, error: 'SERVER_ERROR', message: 'אירעה שגיאה' });
     }
 };
