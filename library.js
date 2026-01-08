@@ -79,7 +79,35 @@ plugin.checkPostingPermissions = async function (data) {
         const userSlug = await User.getUserField(uid, 'userslug');
         const editUrl = userSlug ? `/user/${userSlug}/edit` : '/user/me/edit';
         
-        throw new Error('חובה לאמת מספר טלפון כדי לפרסם תוכן בפורום.<br/>' + 
+        throw new Error('חובה לאמת מספר טלפון כדי להמשיך את הפעילות בפורום.<br/>' + 
+                        'אנא גש ל<a href="' + editUrl + '" target="_blank">הגדרות הפרופיל שלך</a> ולחץ על "עדכון מספר טלפון".');
+    }
+
+    return data;
+};
+
+// ==================== בדיקת הרשאות הצבעה ====================
+
+plugin.checkVotingPermissions = async function (data) {
+    // ב-NodeBB, ה-Hook של הצבעה מקבל אובייקט עם ה-uid של המצביע
+    const uid = data.uid;
+
+    // אורחים או מערכת - דלג
+    if (!uid || parseInt(uid, 10) === 0) return data;
+
+    const settings = await plugin.getSettings();
+    if (!settings.blockUnverifiedUsers) return data;
+
+    const isAdmin = await User.isAdministrator(uid);
+    if (isAdmin) return data;
+
+    const phoneData = await plugin.getUserPhone(uid);
+
+    if (!phoneData || !phoneData.phoneVerified) {
+        const userSlug = await User.getUserField(uid, 'userslug');
+        const editUrl = userSlug ? `/user/${userSlug}/edit` : '/user/me/edit';
+        
+        throw new Error('חובה לאמת מספר טלפון כדי להמשיך את הפעילות בפורום.<br/>' + 
                         'אנא גש ל<a href="' + editUrl + '" target="_blank">הגדרות הפרופיל שלך</a> ולחץ על "עדכון מספר טלפון".');
     }
 
