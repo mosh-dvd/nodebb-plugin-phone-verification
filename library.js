@@ -80,7 +80,7 @@ plugin.checkPostingPermissions = async function (data) {
         const editUrl = userSlug ? `/user/${userSlug}/edit` : '/user/me/edit';
         
         throw new Error('חובה לאמת מספר טלפון כדי להמשיך את הפעילות בפורום.<br/>' + 
-                        'אנא גש ל<a href="' + editUrl + '" target="_blank">הגדרות הפרופיל שלך</a> ולחץ על "עדכון מספר טלפון".');
+                        'אנא גש ל<a href="' + editUrl + '" target="_blank">הגדרות הפרופיל שלך</a> ולחץ על "הוסף מספר טלפון".');
     }
 
     return data;
@@ -108,7 +108,7 @@ plugin.checkVotingPermissions = async function (data) {
         const editUrl = userSlug ? `/user/${userSlug}/edit` : '/user/me/edit';
         
         throw new Error('חובה לאמת מספר טלפון כדי להמשיך את הפעילות בפורום.<br/>' + 
-                        'אנא גש ל<a href="' + editUrl + '" target="_blank">הגדרות הפרופיל שלך</a> ולחץ על "עדכון מספר טלפון".');
+                        'אנא גש ל<a href="' + editUrl + '" target="_blank">הגדרות הפרופיל שלך</a> ולחץ על "הוסף מספר טלפון".');
     }
 
     return data;
