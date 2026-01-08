@@ -227,8 +227,14 @@ define('forum/phone-verification', ['hooks', 'translator'], function (hooks, tra
 
             if (!response.success) return;
 
+            if (response.phone && response.phoneVerified) {
+                return;
+            }
+     
             const hasPhone = response.phone && response.phone.length > 0;
-            const buttonLabel = hasPhone ? 'שינוי מספר טלפון' : 'עדכון מספר טלפון';
+            
+            // עדכון הטקסט שיהיה ברור יותר
+            const buttonLabel = hasPhone ? 'אמת מספר טלפון' : 'הוסף מספר טלפון';
             
             const menuHtml = `
                 <li class="list-group-item" id="sidebar-phone-li">
@@ -237,8 +243,6 @@ define('forum/phone-verification', ['hooks', 'translator'], function (hooks, tra
                     </a>
                 </li>
             `;
-
-            // הוספה לתפריט הצד מתחת לשינוי סיסמה
             const $passwordLink = $('a[href$="/edit/password"]');
             
             if ($passwordLink.length) {
