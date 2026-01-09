@@ -1,281 +1,176 @@
 'use strict';
 
-/* globals $, config, app */
+/* globals $, app, socket, config */
 
-define('admin/plugins/phone-verification', [], function () {
-    var ACP = {};
-    
-    // משתנים גלובליים ל-Pagination
-    var currentPage = 1;
-    var totalPages = 1;
-    var itemsPerPage = 50;
+define('admin/plugins/phone-verification', ['settings', 'bootbox', 'alerts'], function(Settings, bootbox, alerts) {
+	var ACP = {};
 
-    ACP.init = function () {
-        loadSettings();
-        loadUsers(1);
-        
-        // שמירת הגדרות
-        $('#voice-settings-form').on('submit', function (e) {
-            e.preventDefault();
-            saveSettings();
-        });
-        
-        // בדיקת שיחה
-        $('#test-call-btn').on('click', testCall);
-        
-        // חיפוש
-        $('#search-btn').on('click', searchByPhone);
-        $('#phone-search').on('keypress', function (e) {
-            if (e.which === 13) searchByPhone();
-        });
-    };
-    
-    function loadSettings() {
-        $.ajax({
-            url: config.relative_path + '/api/admin/plugins/phone-verification/settings',
-            method: 'GET',
-            success: function (response) {
-                if (response.success) {
-                    var settings = response.settings;
-                    
-                    // טעינת שדות קיימים
-                    $('#voiceServerEnabled').prop('checked', settings.voiceServerEnabled);
-                    if (settings.hasApiKey) {
-                        $('#voiceServerApiKey').val('********');
-                    }
+	ACP.init = function() {
+		// 1. טעינת ושמירת הגדרות
+		Settings.load('phone-verification', $('#voice-settings-form'));
 
-                    // === שדות חדשים שהוספנו ===
-                    $('#voiceServerUrl').val(settings.voiceServerUrl);
-                    $('#blockUnverifiedUsers').prop('checked', settings.blockUnverifiedUsers);
-                    $('#voiceTtsMode').val(settings.voiceTtsMode);
-                    $('#voiceMessageTemplate').val(settings.voiceMessageTemplate);
-                }
-            }
-        });
-    }
-    
-    function saveSettings() {
-        var $btn = $('#save-settings-btn');
-        $btn.prop('disabled', true).html('<i class="fa fa-spinner fa-spin"></i> שומר...');
-        
-        $.ajax({
-            url: config.relative_path + '/api/admin/plugins/phone-verification/settings',
-            method: 'POST',
-            headers: {
-                'x-csrf-token': config.csrf_token
-            },
-            data: {
-                // שדות קיימים
-                voiceServerEnabled: $('#voiceServerEnabled').is(':checked'),
-                voiceServerApiKey: $('#voiceServerApiKey').val(),
-                
-                // === שדות חדשים לשמירה ===
-                voiceServerUrl: $('#voiceServerUrl').val(),
-                blockUnverifiedUsers: $('#blockUnverifiedUsers').is(':checked'),
-                voiceTtsMode: $('#voiceTtsMode').val(),
-                voiceMessageTemplate: $('#voiceMessageTemplate').val()
-            },
-            success: function (response) {
-                if (response.success) {
-                    $('#settings-status').show().delay(2000).fadeOut();
-                } else {
-                    app.alert({
-                        title: 'שגיאה',
-                        message: 'שגיאה בשמירת ההגדרות: ' + (response.message || response.error),
-                        type: 'danger',
-                        timeout: 5000
-                    });
-                }
-                $btn.prop('disabled', false).html('<i class="fa fa-save"></i> שמור הגדרות');
-            },
-            error: function (xhr) {
-                var msg = 'שגיאה בשמירת ההגדרות';
-                if (xhr.responseJSON && xhr.responseJSON.message) {
-                    msg += ': ' + xhr.responseJSON.message;
-                }
-                app.alert({
-                    title: 'שגיאה',
-                    message: msg,
-                    type: 'danger',
-                    timeout: 5000
-                });
-                $btn.prop('disabled', false).html('<i class="fa fa-save"></i> שמור הגדרות');
-            }
-        });
-    }
-    
-    function testCall() {
-        var phone = $('#test-phone').val().trim();
-        var $btn = $('#test-call-btn');
-        var $status = $('#test-status');
-        
-        if (!phone) {
-            $status.html('<span class="text-danger">יש להזין מספר טלפון</span>');
-            return;
-        }
-        
-        $btn.prop('disabled', true).html('<i class="fa fa-spinner fa-spin"></i> שולח...');
-        $status.html('');
-        
-        $.ajax({
-            url: config.relative_path + '/api/admin/plugins/phone-verification/test-call',
-            method: 'POST',
-            headers: {
-                'x-csrf-token': config.csrf_token
-            },
-            data: { phoneNumber: phone },
-            success: function (response) {
-                if (response.success) {
-                    $status.html('<span class="text-success"><i class="fa fa-check"></i> ' + response.message + '</span>');
-                } else {
-                    $status.html('<span class="text-danger"><i class="fa fa-times"></i> ' + (response.message || response.error) + '</span>');
-                }
-                $btn.prop('disabled', false).html('<i class="fa fa-phone"></i> שלח שיחת בדיקה');
-            },
-            error: function () {
-                $status.html('<span class="text-danger">שגיאה בשליחת השיחה</span>');
-                $btn.prop('disabled', false).html('<i class="fa fa-phone"></i> שלח שיחת בדיקה');
-            }
-        });
-    }
-    
-    function loadUsers(page) {
-        page = page || 1;
-        currentPage = page;
-        
-        $.ajax({
-            url: config.relative_path + '/api/admin/plugins/phone-verification/users',
-            method: 'GET',
-            data: { page: page, perPage: itemsPerPage },
-            success: function (response) {
-                if (response.success) {
-                    renderUsers(response.users);
-                    updateStats(response.total, response.users);
-                    totalPages = Math.ceil(response.total / itemsPerPage) || 1;
-                    renderPagination();
-                } else {
-                    showTableError('שגיאה בטעינת הנתונים');
-                }
-            },
-            error: function () {
-                showTableError('שגיאה בטעינת הנתונים');
-            }
-        });
-    }
-    
-    function renderPagination() {
-        var $pagination = $('#users-pagination');
-        $pagination.empty();
-        
-        if (totalPages <= 1) return;
-        
-        var prevDisabled = currentPage === 1 ? 'disabled' : '';
-        $pagination.append('<li class="page-item ' + prevDisabled + '"><a class="page-link" href="#" data-page="' + (currentPage - 1) + '">&laquo; הקודם</a></li>');
-        
-        var startPage = Math.max(1, currentPage - 2);
-        var endPage = Math.min(totalPages, currentPage + 2);
-        
-        for (var i = startPage; i <= endPage; i++) {
-            var active = i === currentPage ? 'active' : '';
-            $pagination.append('<li class="page-item ' + active + '"><a class="page-link" href="#" data-page="' + i + '">' + i + '</a></li>');
-        }
-        
-        var nextDisabled = currentPage === totalPages ? 'disabled' : '';
-        $pagination.append('<li class="page-item ' + nextDisabled + '"><a class="page-link" href="#" data-page="' + (currentPage + 1) + '">הבא &raquo;</a></li>');
-        
-        $pagination.find('a').off('click').on('click', function(e) {
-            e.preventDefault();
-            var page = $(this).data('page');
-            if (page > 0 && page <= totalPages && page !== currentPage) {
-                loadUsers(page);
-            }
-        });
-    }
-    
-    function renderUsers(users) {
-        var $tbody = $('#users-tbody');
-        $tbody.empty();
-        
-        if (!users || users.length === 0) {
-            $tbody.html('<tr><td colspan="4" class="text-center">אין משתמשים עם מספרי טלפון</td></tr>');
-            return;
-        }
-        
-        users.forEach(function (user) {
-            var verifiedDate = user.phoneVerifiedAt ? 
-                new Date(user.phoneVerifiedAt).toLocaleString('he-IL') : '-';
-            var statusBadge = user.phoneVerified ? 
-                '<span class="label label-success">מאומת</span>' : 
-                '<span class="label label-warning">לא מאומת</span>';
-            
-            var row = '<tr>' +
-                '<td><a href="' + config.relative_path + '/admin/manage/users/' + user.uid + '">' + user.uid + ' (' + user.username + ')</a></td>' +
-                '<td dir="ltr">' + formatPhone(user.phone) + '</td>' +
-                '<td>' + verifiedDate + '</td>' +
-                '<td>' + statusBadge + '</td>' +
-                '</tr>';
-            
-            $tbody.append(row);
-        });
-    }
-    
-    function updateStats(total, users) {
-        $('#total-users').text(total || users.length);
-        var verified = users.filter(function (u) { return u.phoneVerified; }).length;
-        // הערה: הסטטיסטיקה כאן חלקית כי היא מבוססת רק על העמוד הנוכחי, 
-        // בגרסה מתקדמת כדאי להביא סטטיסטיקה מהשרת.
-    }
-    
-    function searchByPhone() {
-        var phone = $('#phone-search').val().trim();
-        
-        if (!phone) {
-            showSearchResult('warning', 'יש להזין מספר טלפון');
-            return;
-        }
-        
-        $.ajax({
-            url: config.relative_path + '/api/admin/plugins/phone-verification/search',
-            method: 'GET',
-            data: { phone: phone },
-            success: function (response) {
-                if (response.success) {
-                    if (response.found) {
-                        var user = response.user;
-                        var html = '<strong>נמצא משתמש!</strong><br>' +
-                            'מזהה: <a href="' + config.relative_path + '/admin/manage/users/' + user.uid + '">' + user.uid + ' (' + user.username + ')</a><br>' +
-                            'טלפון: ' + formatPhone(user.phone) + '<br>' +
-                            'סטטוס: ' + (user.phoneVerified ? 'מאומת' : 'לא מאומת');
-                        showSearchResult('success', html);
-                    } else {
-                        showSearchResult('info', 'לא נמצא משתמש עם מספר טלפון זה');
-                    }
-                } else {
-                    showSearchResult('danger', 'שגיאה בחיפוש');
-                }
-            },
-            error: function () {
-                showSearchResult('danger', 'שגיאה בחיפוש');
-            }
-        });
-    }
-    
-    function showSearchResult(type, message) {
-        $('#search-result').show();
-        $('#search-alert')
-            .removeClass('alert-success alert-danger alert-warning alert-info')
-            .addClass('alert-' + type)
-            .html(message);
-    }
-    
-    function showTableError(message) {
-        $('#users-tbody').html('<tr><td colspan="4" class="text-center text-danger">' + message + '</td></tr>');
-    }
-    
-    function formatPhone(phone) {
-        if (!phone || phone.length !== 10) return phone;
-        return phone.substring(0, 3) + '-' + phone.substring(3);
-    }
+		$('#save-settings-btn').on('click', function(e) {
+			e.preventDefault();
+			Settings.save('phone-verification', $('#voice-settings-form'), function() {
+				alerts.success('ההגדרות נשמרו בהצלחה!');
+			});
+		});
 
-    return ACP;
+		var usersTbody = $('#users-tbody');
+		var paginationUl = $('#users-pagination');
+		
+		function loadUsers(page) {
+			page = page || 1;
+			usersTbody.html('<tr><td colspan="6" class="text-center"><i class="fa fa-spinner fa-spin"></i> טוען נתונים...</td></tr>');
+			
+			$.get('/api/admin/plugins/phone-verification/users', { page: page }, function(data) {
+				if (!data || !data.success) {
+					usersTbody.html('<tr><td colspan="6" class="text-center text-danger">שגיאה בטעינת נתונים</td></tr>');
+					return;
+				}
+				if (data.users.length === 0) {
+					usersTbody.html('<tr><td colspan="6" class="text-center">אין משתמשים להצגה</td></tr>');
+					return;
+				}
+				usersTbody.empty();
+				data.users.forEach(function(user) { usersTbody.append(buildUserRow(user)); });
+				$('#total-users').text(data.total); 
+				renderPagination(data.page, data.totalPages);
+			});
+		}
+
+		loadUsers(1);
+
+		paginationUl.on('click', 'a.page-link', function(e) {
+			e.preventDefault();
+			loadUsers($(this).data('page'));
+		});
+
+		// הוספה ידנית
+		$('#btn-add-manual-user').on('click', function() {
+			bootbox.prompt("הזן את <b>שם המשתמש</b> שברצונך להוסיף לרשימת המאומתים:", function(username) {
+				if (!username) return;
+
+				// שימוש בפונקציה שלנו מה-server
+				socket.emit('plugins.call2all.getUidByUsername', { username: username }, function(err, uid) {
+					if (err) return alerts.error(err.message || 'משתמש לא נמצא');
+
+					bootbox.prompt({
+						title: "הזן מספר טלפון עבור " + username + " (אופציונלי)",
+						inputType: 'text',
+						callback: function(phone) {
+							var confirmMsg = "<h4>סיכום פעולה</h4>" +
+											 "<b>שם משתמש:</b> " + username + "<br/>" +
+											 "<b>מספר טלפון:</b> " + (phone ? phone : "ללא מספר (יוגדר כמאומת)") + "<br/><br/>" +
+											 "האם אתה בטוח שברצונך להמשיך?";
+
+							bootbox.confirm(confirmMsg, function(result) {
+								if (result) {
+									socket.emit('plugins.call2all.adminAddVerifiedUser', { uid: uid, phone: phone }, function(err) {
+										if (err) return alerts.error(err.message);
+										alerts.success('המשתמש ' + username + ' הוגדר כמאומת בהצלחה!');
+										loadUsers(1);
+									});
+								}
+							});
+						}
+					});
+				});
+			});
+		});
+
+		$('#test-call-btn').on('click', function() {
+			var phone = $('#test-phone').val();
+			if(!phone) return alerts.error('נא להזין מספר לבדיקה');
+			
+			$.post('/api/admin/plugins/phone-verification/test-call', { phoneNumber: phone, _csrf: config.csrf_token }, function(res) {
+				if(res.success) alerts.success(res.message);
+				else alerts.error(res.message);
+			});
+		});
+
+		$('#users-table').on('click', '.verify-user-btn', function() {
+			var uid = $(this).data('uid');
+			var name = $(this).data('name');
+			bootbox.confirm("האם לאמת ידנית את " + name + "?", function(res) {
+				if(res) socket.emit('plugins.call2all.adminVerifyUser', { uid: uid }, function(err) {
+					if(err) return alerts.error(err.message);
+					alerts.success('המשתמש ' + name + ' אומת!');
+					loadUsers(currentPage);
+				});
+			});
+		});
+
+		$('#users-table').on('click', '.unverify-user-btn', function() {
+			var uid = $(this).data('uid');
+			var name = $(this).data('name');
+			bootbox.confirm("האם לבטל את האימות ל-" + name + "?", function(res) {
+				if(res) socket.emit('plugins.call2all.adminUnverifyUser', { uid: uid }, function(err) {
+					if(err) return alerts.error(err.message);
+					alerts.success('האימות בוטל!');
+					loadUsers(currentPage);
+				});
+			});
+		});
+
+		$('#users-table').on('click', '.delete-phone-btn', function() {
+			var uid = $(this).data('uid');
+			var name = $(this).data('name');
+			bootbox.confirm("האם למחוק את הטלפון של " + name + "?", function(res) {
+				if(res) socket.emit('plugins.call2all.adminDeleteUserPhone', { uid: uid }, function(err) {
+					if(err) return alerts.error(err.message);
+					alerts.success('נמחק!');
+					loadUsers(currentPage);
+				});
+			});
+		});
+
+		$('#search-btn').on('click', function() {
+			var phone = $('#phone-search').val();
+			if (!phone) { loadUsers(1); return; }
+			$.get('/api/admin/plugins/phone-verification/search', { phone: phone }, function(data) {
+				usersTbody.empty();
+				if (data.success && data.found) usersTbody.append(buildUserRow(data.user));
+				else usersTbody.html('<tr><td colspan="6" class="text-center">לא נמצא משתמש</td></tr>');
+			});
+		});
+	};
+
+	function buildUserRow(user) {
+		var displayName = user.username || ('משתמש ' + user.uid);
+		var safeName = displayName.replace(/"/g, '&quot;');
+		var userLink = '/admin/manage/users?searchBy=uid&query=' + user.uid + '&page=1&sortBy=lastonline';
+		
+		var statusBadge = user.phoneVerified ? '<span class="label label-success">מאומת</span>' : '<span class="label label-warning">ממתין</span>';
+		var displayPhone = user.phone ? user.phone : '<span class="text-muted">-- ללא --</span>';
+		var dateStr = user.phoneVerifiedAt ? new Date(user.phoneVerifiedAt).toLocaleDateString('he-IL') : '-';
+
+		var btnVerify = '<button class="btn btn-xs btn-success verify-user-btn" data-uid="' + user.uid + '" data-name="' + safeName + '" title="אמת"><i class="fa fa-check"></i></button>';
+		var btnUnverify = '<button class="btn btn-xs btn-warning unverify-user-btn" data-uid="' + user.uid + '" data-name="' + safeName + '" title="בטל"><i class="fa fa-ban"></i></button>';
+		var btnDelete = '<button class="btn btn-xs btn-danger delete-phone-btn" data-uid="' + user.uid + '" data-name="' + safeName + '" title="מחק"><i class="fa fa-trash"></i></button>';
+
+		var actionBtn = user.phoneVerified ? btnUnverify : btnVerify;
+
+		return '<tr>' +
+			'<td>' + user.uid + '</td>' +
+			'<td><a href="' + userLink + '" target="_blank"><strong>' + displayName + '</strong></a></td>' +
+			'<td dir="ltr">' + displayPhone + '</td>' +
+			'<td>' + dateStr + '</td>' +
+			'<td>' + statusBadge + '</td>' +
+			'<td class="text-right"><div class="btn-group">' + actionBtn + btnDelete + '</div></td>' +
+		'</tr>';
+	}
+
+	var currentPage = 1;
+	function renderPagination(curr, total) {
+		currentPage = curr;
+		paginationUl.empty();
+		if(total <= 1) return;
+		for(var i=1; i<=total; i++) {
+			var active = i === curr ? 'active' : '';
+			paginationUl.append('<li class="' + active + '"><a href="#" class="page-link" data-page="' + i + '">' + i + '</a></li>');
+		}
+	}
+
+	return ACP;
 });
