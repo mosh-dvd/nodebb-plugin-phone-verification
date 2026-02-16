@@ -151,6 +151,32 @@ define('forum/phone-verification', ['hooks', 'translator'], function (hooks, tra
                 });
             });
 
+            $('#resend-code-btn').off('click').on('click', function () {
+                $('#send-code-btn').click();
+            });
+
+            // חסימת שליחת הטופס אם המספר לא אומת
+            const $registerForm = $('[component="register/local"]');
+            const $submitBtn = $registerForm.find('button[type="submit"]');
+            
+            // חסימה על כפתור ההרשמה
+            $submitBtn.prop('disabled', true).attr('title', 'יש לאמת מספר טלפון תחילה');
+            
+            // חסימה על שליחת הטופס
+            $registerForm.off('submit.phone').on('submit.phone', function (e) {
+                if (!self.phoneVerified) {
+                    e.preventDefault();
+                    e.stopImmediatePropagation();
+                    self.showError('חובה לאמת את מספר הטלפון לפני ההרשמה');
+                    $('html, body').animate({
+                        scrollTop: $('#phone-verification-container').offset().top - 100
+                    }, 500);
+                    return false;
+                }
+            });
+            
+            // עדכון: כשהמספר מאומת, הפעל את כפתור ההרשמה
+            const originalVerifyClick = $('#verify-code-btn').data('click-handler');
             $('#verify-code-btn').off('click').on('click', function () {
                 const phone = $('#phoneNumber').val().trim();
                 const code = $('#verificationCode').val().trim();
@@ -178,20 +204,14 @@ define('forum/phone-verification', ['hooks', 'translator'], function (hooks, tra
                             } else {
                                 $('#phoneNumberVerified').val(phone);
                             }
+                            
+                            // הפעל את כפתור ההרשמה
+                            $submitBtn.prop('disabled', false).removeAttr('title');
                         } else {
                             self.showError(response.message || 'קוד שגוי');
                         }
                     }
                 });
-            });
-
-            $('[component="register/local"]').off('submit.phone').on('submit.phone', function (e) {
-                if (!self.phoneVerified) {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    self.showError('יש לאמת את מספר הטלפון לפני ההרשמה');
-                    return false;
-                }
             });
         },
 
