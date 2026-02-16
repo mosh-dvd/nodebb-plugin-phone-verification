@@ -376,13 +376,11 @@ plugin.checkRegistration = async function (data) {
         
         const normalizedPhone = plugin.normalizePhone(phoneNumber);
         
-        // בדיקה שהמספר אומת לפני ההרשמה - בודקים שאין קוד אימות פעיל
-        // אם יש קוד פעיל, זה אומר שהמשתמש לא אימת
-        const key = `${REDIS_PREFIX}${normalizedPhone}`;
-        const verificationData = await db.getObject(key);
+        // בדיקה שהמספר אומת - בודקים את ה-key המיוחד שנוצר רק אחרי אימות מוצלח
+        const verifiedKey = `phone-verification:verified:${normalizedPhone}`;
+        const isVerified = await db.get(verifiedKey);
         
-        if (verificationData && verificationData.hashedCode) {
-            // יש קוד אימות פעיל - המשתמש לא אימת
+        if (!isVerified) {
             throw new Error('חובה לאמת את מספר הטלפון לפני ההרשמה. לחץ על "שלח קוד אימות" והזן את הקוד שקיבלת');
         }
         
