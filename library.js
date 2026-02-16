@@ -375,6 +375,13 @@ plugin.checkRegistration = async function (data) {
         }
         
         const normalizedPhone = plugin.normalizePhone(phoneNumber);
+        
+        // בדיקה שהמספר אומת לפני ההרשמה
+        const isVerified = await plugin.isPhoneVerified(normalizedPhone);
+        if (!isVerified) {
+            throw new Error('חובה לאמת את מספר הטלפון לפני ההרשמה');
+        }
+        
         const existingUid = await plugin.findUserByPhone(normalizedPhone);
         
         if (existingUid) {
